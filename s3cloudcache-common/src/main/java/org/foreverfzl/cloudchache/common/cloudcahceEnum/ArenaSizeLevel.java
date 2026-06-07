@@ -8,6 +8,10 @@ package org.foreverfzl.cloudchache.common.cloudcahceEnum;
  */
 public enum ArenaSizeLevel {
 
+    /** * 轻量级（256MB）：适合测试环境、侧边栏小服务、或者单条数据极小的边缘业务。
+     */
+    TINE(256 * 1024 * 1024L),
+
     /** * 轻量级（512MB）：适合测试环境、侧边栏小服务、或者单条数据极小的边缘业务。
      */
     LIGHTWEIGHT(512 * 1024 * 1024L),

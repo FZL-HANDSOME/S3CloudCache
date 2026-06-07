@@ -7,7 +7,7 @@ import java.util.zip.CRC32;
 /**
  * 磁盘持久化协议格式
  */
-public class DataStruct {
+public class WalDataStruct {
     //+-------------+---------------+--------------+---------------+-----------------+-------------------+
     //| Magic (4B)  | Key Len (4B)  | Value Len(4B)| Checksum (4B) |   Key Bytes     |    Value Bytes    |
     //+-------------+---------------+--------------+---------------+-----------------+-------------------+
@@ -27,12 +27,12 @@ public class DataStruct {
     private final byte[] valueBytes;
 
     /**
-     * 构造一个新的 DataStruct，自动计算字段长度及 CRC32 校验和。
+     * 构造一个新的 WalDataStruct，自动计算字段长度及 CRC32 校验和。
      *
      * @param keyBytes   业务 Key 的字节数组
      * @param valueBytes 业务 Value 的字节数组
      */
-    public DataStruct(byte[] keyBytes, byte[] valueBytes) {
+    public WalDataStruct(byte[] keyBytes, byte[] valueBytes) {
         if (keyBytes == null) {
             throw new IllegalArgumentException("Key bytes cannot be null");
         }
@@ -48,19 +48,19 @@ public class DataStruct {
     }
 
     /**
-     * 基于 String 类型 Key 构造新的 DataStruct，自动计算长度及 CRC32 校验和。
+     * 基于 String 类型 Key 构造新的 WalDataStruct，自动计算长度及 CRC32 校验和。
      *
      * @param key        业务 Key 字符串
      * @param valueBytes 业务 Value 的字节数组
      */
-    public DataStruct(String key, byte[] valueBytes) {
+    public WalDataStruct(String key, byte[] valueBytes) {
         this(key != null ? key.getBytes(StandardCharsets.UTF_8) : null, valueBytes);
     }
 
     /**
-     * 用于反序列化时还原 DataStruct 的完整构造方法。
+     * 用于反序列化时还原 WalDataStruct 的完整构造方法。
      */
-    public DataStruct(int magic, int keyLen, int valueLen, int checksum, byte[] keyBytes, byte[] valueBytes) {
+    public WalDataStruct(int magic, int keyLen, int valueLen, int checksum, byte[] keyBytes, byte[] valueBytes) {
         this.magic = magic;
         this.keyLen = keyLen;
         this.valueLen = valueLen;
@@ -147,10 +147,10 @@ public class DataStruct {
     }
 
     /**
-     * 从 ByteBuffer 中反序列化出 DataStruct 对象。
+     * 从 ByteBuffer 中反序列化出 WalDataStruct 对象。
      * 请确保在调用前 buffer 中有足够的剩余空间。
      */
-    public static DataStruct deserialize(ByteBuffer buffer) {
+    public static WalDataStruct deserialize(ByteBuffer buffer) {
         if (buffer.remaining() < HEADER_LENGTH) {
             throw new IllegalArgumentException("Buffer remaining data is less than header length");
         }
@@ -174,14 +174,14 @@ public class DataStruct {
         byte[] valueBytes = new byte[valueLen];
         buffer.get(valueBytes);
 
-        DataStruct dataStruct = new DataStruct(magic, keyLen, valueLen, checksum, keyBytes, valueBytes);
+        WalDataStruct walDataStruct = new WalDataStruct(magic, keyLen, valueLen, checksum, keyBytes, valueBytes);
 
         // 校验 CRC32 校验码，如果发生磁道/数据损坏则抛出异常
-        if (!dataStruct.validateChecksum()) {
+        if (!walDataStruct.validateChecksum()) {
             throw new IllegalStateException("Data validation failed: Checksum mismatch (data might be corrupted)");
         }
 
-        return dataStruct;
+        return walDataStruct;
     }
 
 }
