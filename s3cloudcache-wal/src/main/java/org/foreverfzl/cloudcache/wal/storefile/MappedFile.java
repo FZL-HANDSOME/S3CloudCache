@@ -48,7 +48,7 @@ public interface MappedFile {
      * 真正的清除该文件
      * @return
      */
-    public abstract boolean clean();
+    public abstract void clean();
 
     /**
      * 获取该文件的引用
@@ -58,21 +58,18 @@ public interface MappedFile {
 
     /**
      * 读取该文件指定的数据到ByteBuffer中
-     * @param offset 起始位置
+     * @param readOffset 起始位置
      * @param size 文件大小
-     * @param byteBuffer 数据读取到这个缓冲区
      * @return
      */
-    public boolean getData(final long offset, final int size, final ByteBuffer byteBuffer);
+    public WalDataStruct getData(final long readOffset, final long size);
 
     /**
      *
-     * @param offset 起始位置
-     * @param size 文件大小
      * @param walDataStruct 磁盘持久化协议格式
      * @return
      */
-    public boolean appendData(final long offset, final int size, final WalDataStruct walDataStruct);
+    public AppendMessageResult appendData(final WalDataStruct walDataStruct);
 
 
 }

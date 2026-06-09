@@ -6,9 +6,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public abstract class ReferenceResource {
 
-    protected final AtomicInteger refCount = new AtomicInteger(0); //目前又多少个线程使用我
-    protected volatile boolean available = true; //是否可引用
-    protected volatile boolean cleanup = false; //是否要删除这个文件
+    private final AtomicInteger refCount = new AtomicInteger(0); //目前又多少个线程使用我
+    private volatile boolean available = true; //是否可引用
+    private volatile boolean cleanup = false; //是否要删除这个文件
 
 
     public boolean isAvailable() {
@@ -25,16 +25,17 @@ public abstract class ReferenceResource {
     }
 
     public void delete() {
+        this.available=false;
         this.cleanup = true;
     }
 
-    //释放该文件
+    //释放该文件的引用
     public int release() {
         return refCount.decrementAndGet();
     }
 
 
-    //获取该文件
+    //获取该文件的引用
     public int hold() {
         if (!available) {
             return refCount.incrementAndGet();

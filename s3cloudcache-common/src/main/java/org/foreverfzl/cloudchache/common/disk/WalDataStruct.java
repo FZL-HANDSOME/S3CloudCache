@@ -122,7 +122,7 @@ public class WalDataStruct {
      * 校验当前数据的校验和是否正确。
      */
     private boolean validateChecksum() {
-        int computed = (int) calculateCRC32(this.keyBytes, this.valueBytes);
+        long computed = calculateCRC32(this.keyBytes, this.valueBytes);
         return this.checksum == computed;
     }
 
@@ -141,7 +141,7 @@ public class WalDataStruct {
         buffer.putInt(magic);
         buffer.putInt(keyLen);
         buffer.putInt(valueLen);
-        buffer.putInt(checksum);
+        buffer.putLong(checksum);
         buffer.put(keyBytes);
         buffer.put(valueBytes);
     }
