@@ -11,7 +11,7 @@ import java.util.concurrent.*;
 public class DefaultMappedFileText {
 
     static void main() throws Exception {
-//        testConcurrentWriteThenRead();
+        testConcurrentWriteThenRead();
 //        textAppend();
     }
 
@@ -26,7 +26,7 @@ public class DefaultMappedFileText {
         WalDataStruct walDataStruct = new WalDataStruct(key.getBytes(StandardCharsets.UTF_8), value.getBytes(StandardCharsets.UTF_8));
         AppendMessageResult appendMessageResult = defaultMappedFile.appendData(walDataStruct);
         long wroteOffset = appendMessageResult.getWroteOffset();
-        int wroteBytes = appendMessageResult.getWroteBytes();
+        long wroteBytes = appendMessageResult.getWroteBytes();
         WalDataStruct data = defaultMappedFile.getData(wroteOffset, wroteBytes);
         String readKey = new String(data.getKeyBytes(), StandardCharsets.UTF_8);
         String valueS = new String(data.getValueBytes(), StandardCharsets.UTF_8);

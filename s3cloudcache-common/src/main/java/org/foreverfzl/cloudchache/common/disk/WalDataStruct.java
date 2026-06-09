@@ -8,21 +8,21 @@ import java.util.zip.CRC32;
  * 磁盘持久化协议格式
  */
 public class WalDataStruct {
-    //+-------------+---------------+--------------+---------------+-----------------+-------------------+
-    //| Magic (4B)  | Key Len (4B)  | Value Len(4B)| Checksum (4B) |   Key Bytes     |    Value Bytes    |
-    //+-------------+---------------+--------------+---------------+-----------------+-------------------+
-    //  0x53334343    变长(如 9B)     变长(如 500B)     CRC32 校验码    "ORDER_123"          [原始数据]
+    //+----------------+---------------+--------------+------------------+-----------------+-------------------+
+    //| Magic (8B)     | Key Len (4B)  | Value Len(4B)| Checksum (8B)    |   Key Bytes     |    Value Bytes    |
+    //+----------------+---------------+--------------+------------------+-----------------+-------------------+
+    //     0x53334343    变长(如 9B)      变长(如 500B)      CRC32 校验码        "ORDER_123"        [原始数据]
 
     // 固定魔数 0x53334343 (ASCII "S3CC")
     public static final int MAGIC_NUMBER = 0x53334343;
 
-    // 协议头部长度固定为 16 字节 (4 + 4 + 4 + 4)
-    public static final int HEADER_LENGTH = 16;
+    // 协议头部长度固定为 16 字节 (8 + 4 + 4 + 8)
+    public static final long HEADER_LENGTH = 24;
 
-    private final int magic;
+    private final long magic;
     private final int keyLen;
     private final int valueLen;
-    private final int checksum;
+    private final long checksum;
     private final byte[] keyBytes;
     private final byte[] valueBytes;
 
@@ -60,7 +60,7 @@ public class WalDataStruct {
     /**
      * 用于反序列化时还原 WalDataStruct 的完整构造方法。
      */
-    public WalDataStruct(int magic, int keyLen, int valueLen, int checksum, byte[] keyBytes, byte[] valueBytes) {
+    public WalDataStruct(long magic, int keyLen, int valueLen, long checksum, byte[] keyBytes, byte[] valueBytes) {
         this.magic = magic;
         this.keyLen = keyLen;
         this.valueLen = valueLen;
@@ -69,7 +69,7 @@ public class WalDataStruct {
         this.valueBytes = valueBytes;
     }
 
-    public int getMagic() {
+    public long getMagic() {
         return magic;
     }
 
@@ -81,7 +81,7 @@ public class WalDataStruct {
         return valueLen;
     }
 
-    public int getChecksum() {
+    public long getChecksum() {
         return checksum;
     }
 
@@ -100,8 +100,10 @@ public class WalDataStruct {
     /**
      * 获取当前数据包序列化后的总字节数 (Header + Key + Value)
      */
-    public int getSerializedSize() {
-        return HEADER_LENGTH + keyLen + valueLen;
+    public long getSerializedSize() {
+        long size = HEADER_LENGTH + keyLen + valueLen;
+        //保证8字节对齐，返回8的整数
+        return (size + 7) & ~7;
     }
 
     /**
@@ -138,7 +140,7 @@ public class WalDataStruct {
      * 序列化写入传入的 ByteBuffer。
      */
     public void serialize(ByteBuffer buffer) {
-        buffer.putInt(magic);
+        buffer.putLong(magic);
         buffer.putInt(keyLen);
         buffer.putInt(valueLen);
         buffer.putLong(checksum);
@@ -155,14 +157,14 @@ public class WalDataStruct {
             throw new IllegalArgumentException("Buffer remaining data is less than header length");
         }
 
-        int magic = buffer.getInt();
+        long magic = buffer.getLong();
         if (magic != MAGIC_NUMBER) {
             throw new IllegalArgumentException(String.format("Invalid magic number: 0x%08X", magic));
         }
 
         int keyLen = buffer.getInt();
         int valueLen = buffer.getInt();
-        int checksum = buffer.getInt();
+        long checksum = buffer.getLong();
 
         if (buffer.remaining() < keyLen + valueLen) {
             throw new IllegalArgumentException("Buffer remaining data is less than keyLen + valueLen");

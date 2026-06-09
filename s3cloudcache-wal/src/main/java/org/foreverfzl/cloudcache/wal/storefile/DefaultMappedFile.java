@@ -28,7 +28,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     protected long fileFromOffset; //文件的起始位点，也就是文件的地址
     protected volatile long wrotePosition; //数据写入位置
-    protected volatile long readPosition; //写入到操作系统文件缓冲区的位置
+    protected volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     protected volatile long upLoadPosition; //该文件上传到云服务器的位置
 
 
@@ -131,22 +131,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
 //        }
     }
 
-    /**
-     * 删除对应文件并释放资源的方法
-     */
-    @Override
-    public void clean() {
-        try {
-            //释放mmp
-            arena.close();
-            fileChannel.close();
-            file.delete();
-        } catch (Exception e) {
-            throw new RuntimeException(
-                    "Failed to Clean Filed: " + ProjectUtil.DISK_PERSISTENT_ADDRESS + fileName, e
-            );
-        }
-    }
 
 
     /**
@@ -190,8 +174,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
             MemorySegment slice = mappedMemorySegment.asSlice(readOffset, size);
             long pos = 0;
             // 读取 Header 字段
-            int magic = slice.get(ValueLayout.JAVA_INT, pos);
-            pos += 4;
+            long magic = slice.get(ValueLayout.JAVA_LONG, pos);
+            pos += 8;
 
             int keyLen = slice.get(ValueLayout.JAVA_INT, pos);
             pos += 4;
@@ -199,13 +183,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
             int valueLen = slice.get(ValueLayout.JAVA_INT, pos);
             pos += 4;
 
-            int checksum = slice.get(ValueLayout.JAVA_INT, pos);
-            pos += 4;
+            long checksum = slice.get(ValueLayout.JAVA_LONG, pos);
+            pos += 8;
 
             // 3. 校验魔数
             if (magic != WalDataStruct.MAGIC_NUMBER) {
                 log.warn("getData: invalid magic number 0x{} at readOffset={}, fileName={}",
-                        Integer.toHexString(magic), readOffset, fileName);
+                        Long.toHexString(magic), readOffset, fileName);
                 return null;
             }
 
@@ -277,7 +261,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
         }
 
-        int msgSize = walDataStruct.getSerializedSize();
+        long msgSize = walDataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;
@@ -315,18 +299,18 @@ public class DefaultMappedFile extends AbstractMappedFile {
      * @param walDataStruct 磁盘持久化协议格式数据
      * @return AppendMessageResult 写入结果
      */
-    private AppendMessageResult doAppend(final long writeOffset, final int size, final WalDataStruct walDataStruct) {
+    private AppendMessageResult doAppend(final long writeOffset, final long size, final WalDataStruct walDataStruct) {
         try {
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             long pos = 0;
             // 1. Magic
             targetSlice.set(
-                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_LONG,
                     pos,
                     walDataStruct.getMagic()
             );
-            pos += 4;
+            pos += 8;
 
             // 2. Key Length
             targetSlice.set(
@@ -346,11 +330,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
             // 4. CRC32
             targetSlice.set(
-                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_LONG,
                     pos,
                     walDataStruct.getChecksum()
             );
-            pos += 4;
+            pos += 8;
 
             // 5. Key Bytes
             byte[] keyBytes = walDataStruct.getKeyBytes();
@@ -375,7 +359,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     pos,
                     valueBytes.length
             );
-
             return new AppendMessageResult(
                     AppendMessageResult.AppendStatus.PUT_OK,
                     writeOffset,
@@ -390,6 +373,22 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
+    /**
+     * 删除对应文件并释放资源的方法
+     */
+    @Override
+    public void clean() {
+        try {
+            //释放mmp
+            arena.close();
+            fileChannel.close();
+            file.delete();
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to Clean Filed: " + ProjectUtil.DISK_PERSISTENT_ADDRESS + fileName, e
+            );
+        }
+    }
 
     @Override
     public String getFileName() {

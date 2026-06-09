@@ -88,7 +88,8 @@ public final class ProjectUtil {
     }
 
     //锁定指定内存，防止转移到虚拟内存中
-    public static void lockMemory(MemorySegment memorySegment) {
+    //todo 目前锁PageCache不知道能不能成功，操作系统默认只让用户锁64MB
+    public static void lockMappedPages(MemorySegment memorySegment) {
         long size = memorySegment.byteSize();
         // 2. 锁定内存，防止操作系统将其换出到虚拟内存或发生移动
         if (ProjectUtil.LOCK_HANDLE != null) {
@@ -112,7 +113,7 @@ public final class ProjectUtil {
     }
 
     //取消锁定指定内存
-    public static void unlockMemory(MemorySegment memorySegment) {
+    public static void unlockMappedPages(MemorySegment memorySegment) {
         if (memorySegment == null) {
             return;
         }

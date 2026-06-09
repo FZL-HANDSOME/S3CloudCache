@@ -41,7 +41,7 @@ public class AppendMessageResult {
     /**
      * 实际写入的字节数
      */
-    private final int wroteBytes;
+    private final long wroteBytes;
 
     /**
      * 写入时的时间戳
@@ -62,7 +62,7 @@ public class AppendMessageResult {
         storeTimestamp = -1;
     }
 
-    public AppendMessageResult(AppendStatus status, long wroteOffset, int wroteBytes,
+    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
                                long storeTimestamp, String fileName) {
         this.status = status;
         this.wroteOffset = wroteOffset;
@@ -93,7 +93,7 @@ public class AppendMessageResult {
         return wroteOffset;
     }
 
-    public int getWroteBytes() {
+    public long getWroteBytes() {
         return wroteBytes;
     }
 
