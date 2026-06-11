@@ -1,4 +1,4 @@
-package org.foreverfzl.cloudchache.common.disk;
+package org.foreverfzl.cloudcache.wal.storefile;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;

@@ -1,14 +1,10 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
-import org.foreverfzl.cloudchache.common.disk.WalDataStruct;
-
-import java.lang.foreign.MemorySegment;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 
 public interface MappedFile {
 
-    public void init(String fileName,long fileSize);
+    public void init();
 
     /**
      * 文件预热，并且根据配置选择是否锁定预热PageCache
@@ -57,12 +53,19 @@ public interface MappedFile {
     public int hold();
 
     /**
-     * 读取该文件指定的数据到ByteBuffer中
+     * 读取该文件数据
      * @param readOffset 起始位置
      * @param size 文件大小
      * @return
      */
     public WalDataStruct getData(final long readOffset, final long size);
+
+    /**
+     * 读取该文件数据
+     * @param readOffset 起始位置
+     * @return
+     */
+    public WalDataStruct getData(long readOffset);
 
     /**
      *

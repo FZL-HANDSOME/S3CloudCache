@@ -2,7 +2,7 @@ package org.foreverfzl.cloudcache.wal.storefile;
 
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
-import org.foreverfzl.cloudchache.common.disk.WalDataStruct;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,13 +26,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected static final AtomicLongFieldUpdater<DefaultMappedFile> READ_POSITION_UPDATER;
     protected static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
 
-    protected long fileFromOffset; //文件的起始位点，也就是文件的地址
-    protected volatile long wrotePosition; //数据写入位置
-    protected volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
-    protected volatile long upLoadPosition; //该文件上传到云服务器的位置
+    public volatile long wrotePosition; //数据写入位置
+    public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
+    public volatile long upLoadPosition; //该文件上传到云服务器的位置
 
 
     protected File file;
+    protected String filePath;
     protected String fileName;
     protected long fileSize;
     protected FileChannel fileChannel;
@@ -48,33 +48,34 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public DefaultMappedFile() {
     }
 
-    public DefaultMappedFile(final String fileName, final long fileSize) {
+    public DefaultMappedFile(final String filePath, final String fileName, final long fileSize) {
         this.fileName = fileName;
         this.fileSize = fileSize;
+        this.filePath = filePath;
         arena = Arena.ofShared(); //创建MS的控制对象
-        init(fileName, fileSize);
+        init();
     }
 
     /**
      * 创建并初始化WAL文件，并且将channel、指针等初始化
      *
-     * @param fileName
-     * @param fileSize
      */
     @Override
-    public void init(String fileName, long fileSize) {
+    public void init() {
         if (fileName == null || fileName.isBlank()) {
-            throw new IllegalArgumentException("fileName cannot be null");
+            throw new WalException("fileName cannot be null");
         }
-
+        if (filePath == null || filePath.isBlank()) {
+            throw new WalException("fileName cannot be null");
+        }
         if (fileSize <= 0) {
-            throw new IllegalArgumentException("fileSize must be greater than 0");
+            throw new WalException("fileSize must be greater than 0");
         }
         try {
             // 创建目录
-            File dir = new File(ProjectUtil.DISK_PERSISTENT_ADDRESS);
+            File dir = new File(filePath);
             if (!dir.exists() && !dir.mkdirs()) {
-                throw new RuntimeException("Failed to create directory: " + dir);
+                throw new WalException("Failed to create directory: " + dir);
             }
             // 创建文件对象
             this.file = new File(dir, fileName);
@@ -88,7 +89,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //进行文件预热，每16384页刷盘一次，防止脏页过多
             warm(16384);
         } catch (Exception e) {
-            throw new RuntimeException(
+            throw new WalException(
                     "Failed to initialize cache file: " + fileName, e
             );
         }
@@ -102,10 +103,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
     @Override
     public void warm(int pages) {
         if (mappedMemorySegment == null) {
-            throw new IllegalStateException("mappedMemorySegment has not been mapped yet.");
+            throw new WalException("mappedMemorySegment has not been mapped yet.");
         }
         if (pages <= 0) {
-            throw new IllegalArgumentException("pages must be greater than 0");
+            throw new WalException("pages must be greater than 0");
         }
 
         long size = mappedMemorySegment.byteSize();
@@ -130,7 +131,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
 //            ProjectUtil.lockMemory(this.mappedMemorySegment);
 //        }
     }
-
 
 
     /**
@@ -235,6 +235,16 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     fileName, readOffset, size, e);
             return null;
         }
+    }
+
+    /**
+     * 获取一条完整数据
+     * @param readOffset 起始位置
+     * @return
+     */
+    @Override
+    public WalDataStruct getData(long readOffset) {
+        return null;
     }
 
     /**
@@ -384,8 +394,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
             fileChannel.close();
             file.delete();
         } catch (Exception e) {
-            throw new RuntimeException(
-                    "Failed to Clean Filed: " + ProjectUtil.DISK_PERSISTENT_ADDRESS + fileName, e
+            throw new WalException(
+                    "Failed to Clean Filed: " + filePath + File.separator + fileName, e
             );
         }
     }

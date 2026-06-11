@@ -1,4 +1,4 @@
 package org.foreverfzl.cloudcache.storage.factory;
 
-public class CloudCacheInstanceFactory {
+public class S3CloudCacheInstanceFactory {
 }
