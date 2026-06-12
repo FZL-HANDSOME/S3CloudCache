@@ -22,10 +22,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     protected static final Logger log = LoggerFactory.getLogger(LogName.WAL_STORE_FILE);
 
-    protected static final AtomicLongFieldUpdater<DefaultMappedFile> WROTE_POSITION_UPDATER;
-    protected static final AtomicLongFieldUpdater<DefaultMappedFile> READ_POSITION_UPDATER;
-    protected static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
+    public static final AtomicLongFieldUpdater<DefaultMappedFile> WROTE_POSITION_UPDATER;
+    public static final AtomicLongFieldUpdater<DefaultMappedFile> READ_POSITION_UPDATER;
+    public static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
 
+    public volatile long fileFromOffset;
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
@@ -48,9 +49,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public DefaultMappedFile() {
     }
 
-    public DefaultMappedFile(final String filePath, final String fileName, final long fileSize) {
+    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, final long fileSize) {
         this.fileName = fileName;
         this.fileSize = fileSize;
+        this.fileFromOffset = fileFromOffset;
         this.filePath = filePath;
         arena = Arena.ofShared(); //创建MS的控制对象
         init();
@@ -239,6 +241,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     /**
      * 获取一条完整数据
+     *
      * @param readOffset 起始位置
      * @return
      */
@@ -410,7 +413,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return this.fileChannel;
     }
 
-
+    public MemorySegment getMappedMemorySegment() {
+        return mappedMemorySegment;
+    }
 }
 
 

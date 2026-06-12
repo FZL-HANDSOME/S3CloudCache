@@ -1,12 +1,11 @@
-package org.foreverfzl.cloudchache.common.cache;
+package org.foreverfzl.cloudcache.core.cache;
 
-import java.lang.foreign.MemorySegment;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**
  * 一个默认5MB的缓冲块
  */
-public class CloudCacheBlock implements UpLoad {
+public class CloudCacheBlock implements CacheBlock {
     private long blockId;
     private String s3Key;
 
@@ -14,19 +13,19 @@ public class CloudCacheBlock implements UpLoad {
     private final long blockBaseOffset;
     private final int blockSize;
 
-    protected static final AtomicIntegerFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
-    protected static final AtomicIntegerFieldUpdater<CloudCacheBlock> REFERENCE_COUNT;
+    protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
+    protected static final AtomicLongFieldUpdater<CloudCacheBlock> REFERENCE_COUNT;
 
-    private volatile int writePosition; //写指针
-    private volatile int referenceCount; //目前有多少个线程正在向该Block中写入
+    private volatile long writePosition; //写指针
+    private volatile long referenceCount; //目前有多少个线程正在向该Block中写入
     private volatile boolean available = true; //该block是否可写入
 
     private volatile long walMinPosition; //该Block中的数据目前对应WAL文件的最小位置
     private volatile long walMaxPosition; //该Block中的数据目前对应WAL文件的最大位置
 
     static {
-        WROTE_POSITION_UPDATER = AtomicIntegerFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
-        REFERENCE_COUNT = AtomicIntegerFieldUpdater.newUpdater(CloudCacheBlock.class, "referenceCount");
+        WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
+        REFERENCE_COUNT = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "referenceCount");
     }
 
     public CloudCacheBlock(long blockBaseOffset, int blockSize, long blockId) {
@@ -51,11 +50,11 @@ public class CloudCacheBlock implements UpLoad {
         return blockSize;
     }
 
-    public int getWritePosition() {
+    public long getWritePosition() {
         return writePosition;
     }
 
-    public int getReferenceCount() {
+    public long getReferenceCount() {
         return referenceCount;
     }
 

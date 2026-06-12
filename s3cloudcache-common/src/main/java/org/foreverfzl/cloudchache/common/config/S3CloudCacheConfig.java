@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudchache.common.config;
 
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.AckLevel;
+import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockSizeLevel;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.PageFlushLevel;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.WalFileSize;
 
@@ -30,13 +31,55 @@ public class S3CloudCacheConfig {
     /**
      * Page刷盘级别
      */
-    private long pageFlushLevel = PageFlushLevel.NORMAL_20_MS.getFlushIntervalMs();
-
+    private long pageFlushLevel = PageFlushLevel.FAST_10_MS.getFlushIntervalMs();
 
 
 
     /* 缓冲区配置 ——————————————————————————————————————————————————————————*/
 
+    private int blockSize = BlockSizeLevel.SMALL.getBytes();
 
+
+    //-----------------------------------------------------------------------------------------
+
+    public boolean isLockMappedFilePageCache() {
+        return isLockMappedFilePageCache;
+    }
+
+    public void setLockMappedFilePageCache(boolean lockMappedFilePageCache) {
+        isLockMappedFilePageCache = lockMappedFilePageCache;
+    }
+
+    public long getWalFileSize() {
+        return walFileSize;
+    }
+
+    public void setWalFileSize(long walFileSize) {
+        this.walFileSize = walFileSize;
+    }
+
+    public AckLevel getAckLevel() {
+        return ackLevel;
+    }
+
+    public void setAckLevel(AckLevel ackLevel) {
+        this.ackLevel = ackLevel;
+    }
+
+    public long getPageFlushLevel() {
+        return pageFlushLevel;
+    }
+
+    public void setPageFlushLevel(long pageFlushLevel) {
+        this.pageFlushLevel = pageFlushLevel;
+    }
+
+    public int getBlockSize() {
+        return blockSize;
+    }
+
+    public void setBlockSize(int blockSize) {
+        this.blockSize = blockSize;
+    }
 }
 

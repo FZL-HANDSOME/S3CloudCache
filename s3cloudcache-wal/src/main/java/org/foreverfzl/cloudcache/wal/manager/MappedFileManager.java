@@ -1,11 +1,14 @@
 package org.foreverfzl.cloudcache.wal.manager;
 
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
+import java.lang.foreign.MemorySegment;
+import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
@@ -19,53 +22,72 @@ public class MappedFileManager {
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
     //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
     private volatile long globalReadPosition;
-    //最新的可写文件
-    private volatile DefaultMappedFile lastMappedFile;
     //刷新所有文件的读指针
-    private Thread flushReadPosition;
+    private final Thread flushReadPositionThread;
     //检查所有的文件，控制文件是否要删除
-    private Thread chackMappedFile;
+    private final Thread chackMappedFileThread;
     //主要控制线程flushReadPosition、chackMappedFile等的执行
-    private volatile boolean active;
+    private volatile boolean active=true;
+
+
+    private S3CloudCacheConfig config;
 
     public MappedFileManager() {
-        flushReadPosition = new Thread(new Runnable() {
+        flushReadPositionThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 flushReadPositionTask();
             }
         });
-        chackMappedFile = new Thread(new Runnable() {
+        chackMappedFileThread = new Thread(new Runnable() {
             @Override
             public void run() {
                 chackMappedFileTask();
             }
         });
+
+    }
+
+    private void init(){
+        flushReadPositionThread.start();
+        chackMappedFileThread.start();
     }
 
     public void flushReadPositionTask() {
         try {
             while (active) {
-                //根据该instance的globalReadPosition获取到指定文件
-                DefaultMappedFile mappedFile = mappedFiles.get(globalReadPosition);
-                if(mappedFile==null){
-                    throw new WalException("flushReadPositionTask failed: can not find DefaultMappedFile Object");
+                // 利用 floorEntry 解决绝对位点路由问题
+                Map.Entry<Long, DefaultMappedFile> entry = mappedFiles.floorEntry(globalReadPosition);
+                if (entry == null) {
+                    // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
+                    Thread.sleep(config.getPageFlushLevel());
+                    continue;
                 }
-                if (mappedFile.readPosition != mappedFile.wrotePosition) {
+                DefaultMappedFile mappedFile = entry.getValue();
+                if (mappedFile == null) {
+                    throw new WalException("flushReadPositionTask failed: can not find `" + globalReadPosition + "` DefaultMappedFile Object");
+                }
+                long readPosition = mappedFile.readPosition;
+                long wrotePosition = mappedFile.wrotePosition;
+                if (readPosition != wrotePosition) {
                     //读取文件数据，检查数据是否正常，正常则force()更新readPosition
-
+                    long size = wrotePosition - readPosition;
+                    MemorySegment targetSegment = mappedFile.getMappedMemorySegment().asSlice(readPosition, size);
+                    //强制刷盘
+                    targetSegment.force();
+                    //刷盘成功更新指针
+                    mappedFile.readPosition = wrotePosition;
+                    globalReadPosition += size;
                 }
-                Thread.sleep(10);
+                Thread.sleep(config.getPageFlushLevel());
             }
         } catch (Exception e) {
             log.error(e.getMessage());
         }
-
     }
 
     public void chackMappedFileTask() {
 
     }
-
 
 }
