@@ -25,7 +25,11 @@ public class AppendMessageResult {
         /**
          * 写入过程中发生未知错误
          */
-        UNKNOWN_ERROR
+        UNKNOWN_ERROR,
+        /**
+         * 文件关闭
+         */
+        FILE_CLOSED
     }
 
     /**

@@ -12,6 +12,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.channels.FileChannel;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 
@@ -40,6 +41,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected Arena arena;
     protected MemorySegment mappedMemorySegment; //本质是MMP内存映射
 
+    //Block、upLoadPosition更新相关
+    protected int totalBlockCount; //该文件逻辑上对应多少个Block
+    protected int blockSize;
+    protected long[] blockEndOffsetInMappedFile; //upLoadPosition指针更新辅助数组指针更新辅助数组
+    protected AtomicInteger nextUploadBlockIndex = new AtomicInteger(0); //upLoadPosition指针期望下次更新index
+
+
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "wrotePosition");
         READ_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "readPosition");
@@ -47,13 +55,17 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     public DefaultMappedFile() {
+
     }
 
-    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, final long fileSize) {
+    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, final long fileSize, final int blockSize) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
         this.filePath = filePath;
+        this.blockSize = blockSize;
+        this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
+        blockEndOffsetInMappedFile = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
         init();
     }
@@ -95,6 +107,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     "Failed to initialize cache file: " + fileName, e
             );
         }
+    }
+
+
+    // 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针
+    public void ackUpLoadPosition(int logicalIndex, long endOffsetInFile) {
+
     }
 
     /**
@@ -264,6 +282,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final WalDataStruct walDataStruct) {
+        if(!isAvailable())return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED,this.fileName);
         // 1. 参数校验
         if (walDataStruct == null) {
             log.warn("appendData: walDataStruct cannot be null, fileName={}", fileName);
@@ -273,7 +292,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             log.warn("appendData: invalid magic number in walDataStruct, fileName={}", fileName);
             return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
         }
-
         long msgSize = walDataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
@@ -281,13 +299,18 @@ public class DefaultMappedFile extends AbstractMappedFile {
         do {
             currentPos = WROTE_POSITION_UPDATER.get(this);
             newPos = currentPos + msgSize;
-            // 边界检查：剩余空间不足以容纳本条消息
             if (newPos > this.fileSize) {
+                // 边界检查：剩余空间不足以容纳本条消息
+                //todo 将本文件设置为不可写入,然后返回END_OF_FILE，之后尝试去新的文件中写
+                close();
                 log.warn("appendData: not enough space, currentPos={}, msgSize={}, fileSize={}, fileName={}",
                         currentPos, msgSize, this.fileSize, fileName);
                 return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
             }
         } while (!WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos));
+        //采用空间预留 解耦物理和逻辑Block
+        //先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
+        //todo
 
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         AppendMessageResult result = doAppend(currentPos, msgSize, walDataStruct);
@@ -415,6 +438,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public MemorySegment getMappedMemorySegment() {
         return mappedMemorySegment;
+    }
+
+    public long getFileSize() {
+        return fileSize;
+    }
+
+    public long getFileFromOffset() {
+        return fileFromOffset;
     }
 }
 

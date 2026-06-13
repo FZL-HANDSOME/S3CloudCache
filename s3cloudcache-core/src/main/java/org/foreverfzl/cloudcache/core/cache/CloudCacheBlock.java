@@ -1,37 +1,56 @@
 package org.foreverfzl.cloudcache.core.cache;
 
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**
  * 一个默认5MB的缓冲块
  */
-public class CloudCacheBlock implements CacheBlock {
+public class CloudCacheBlock extends CacheBlockReferenceResource implements CacheBlock {
     private long blockId;
     private String s3Key;
 
     // 仅仅记录该 Block 在全局 连续堆外内存中的“物理起跑线”
-    private final long blockBaseOffset;
+    private final long blockFromOffset;
     private final int blockSize;
 
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
-    protected static final AtomicLongFieldUpdater<CloudCacheBlock> REFERENCE_COUNT;
-
     private volatile long writePosition; //写指针
-    private volatile long referenceCount; //目前有多少个线程正在向该Block中写入
-    private volatile boolean available = true; //该block是否可写入
 
-    private volatile long walMinPosition; //该Block中的数据目前对应WAL文件的最小位置
-    private volatile long walMaxPosition; //该Block中的数据目前对应WAL文件的最大位置
+    //逻辑位点层，这一部分在分配WAL文件写指针后确认的
+    //为了保证每个Block里面只能存放一个WAL文件的数据，如果为null说明该Block里面没有数据，否则代表该Block存放了对应文件的数据
+    private DefaultMappedFile mappedFile;
+    private volatile int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
+    private volatile long endOffsetInMappedFile;
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
-        REFERENCE_COUNT = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "referenceCount");
     }
 
-    public CloudCacheBlock(long blockBaseOffset, int blockSize, long blockId) {
-        this.blockBaseOffset = blockBaseOffset;
+    public CloudCacheBlock(long blockFromOffset, int blockSize, long blockId) {
+        this.blockFromOffset = blockFromOffset;
         this.blockSize = blockSize;
         this.blockId = blockId;
+    }
+
+    /**
+     * 业务线程完成写入后的收尾逻辑
+     */
+    public void releaseReference() {
+        // 1. 递减当前正在写入的线程数
+        long refs = this.refCount.decrementAndGet();
+        // 2. 如果自己是最后一个离开的，且该 Block 已经宣布封板（不再接收新数据）
+        if (refs == 0 && !this.available) {
+            // 🚨 终极计算：由于是顺序写入，这个 Block 最终写到了哪里，writePosition 最清楚！
+            // 逻辑起始位点 = 组装时的 index * 块大小
+            long blockBaseOffsetInFile = (long) this.logicalIndex * this.blockSize;
+            // 最终在 MappedFile 中的绝对结束位点 = 起始位点 + 堆外内存实际写入的物理长度
+            this.endOffsetInMappedFile = blockBaseOffsetInFile + this.writePosition;
+            // 3. 此时该 Block 彻底固化，正式提交给异步线程池上云
+            //todo 上传服务器
+
+        }
     }
 
     public long getBlockId() {
@@ -42,8 +61,8 @@ public class CloudCacheBlock implements CacheBlock {
         return s3Key;
     }
 
-    public long getBlockBaseOffset() {
-        return blockBaseOffset;
+    public long getBlockFromOffset() {
+        return blockFromOffset;
     }
 
     public int getBlockSize() {
@@ -54,44 +73,12 @@ public class CloudCacheBlock implements CacheBlock {
         return writePosition;
     }
 
-    public long getReferenceCount() {
-        return referenceCount;
-    }
-
-    public boolean isAvailable() {
-        return available;
-    }
-
-    public long getWalMinPosition() {
-        return walMinPosition;
-    }
-
-    public long getWalMaxPosition() {
-        return walMaxPosition;
-    }
-
     public void setS3Key(String s3Key) {
         this.s3Key = s3Key;
     }
 
-    public void setAvailable(boolean available) {
-        this.available = available;
-    }
-
     public void setWritePosition(int writePosition) {
         this.writePosition = writePosition;
-    }
-
-    public void setReferenceCount(int referenceCount) {
-        this.referenceCount = referenceCount;
-    }
-
-    public void setWalMaxPosition(long walMaxPosition) {
-        this.walMaxPosition = walMaxPosition;
-    }
-
-    public void setWalMinPosition(long walMinPosition) {
-        this.walMinPosition = walMinPosition;
     }
 
     public void setBlockId(long blockId) {

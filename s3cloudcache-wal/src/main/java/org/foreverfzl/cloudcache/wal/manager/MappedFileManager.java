@@ -27,7 +27,7 @@ public class MappedFileManager {
     //检查所有的文件，控制文件是否要删除
     private final Thread chackMappedFileThread;
     //主要控制线程flushReadPosition、chackMappedFile等的执行
-    private volatile boolean active=true;
+    private volatile boolean active = true;
 
 
     private S3CloudCacheConfig config;
@@ -48,7 +48,7 @@ public class MappedFileManager {
 
     }
 
-    private void init(){
+    private void init() {
         flushReadPositionThread.start();
         chackMappedFileThread.start();
     }
@@ -56,17 +56,15 @@ public class MappedFileManager {
     public void flushReadPositionTask() {
         try {
             while (active) {
-                // 利用 floorEntry 解决绝对位点路由问题
+                // 利用 floorEntry 解决绝对位点路由问题，时间复杂度为logn，但是数据量少可以忽略
                 Map.Entry<Long, DefaultMappedFile> entry = mappedFiles.floorEntry(globalReadPosition);
                 if (entry == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
+                    log.warn("flushReadPositionTask failed: can not find `{}` DefaultMappedFile Object", globalReadPosition);
                     Thread.sleep(config.getPageFlushLevel());
                     continue;
                 }
                 DefaultMappedFile mappedFile = entry.getValue();
-                if (mappedFile == null) {
-                    throw new WalException("flushReadPositionTask failed: can not find `" + globalReadPosition + "` DefaultMappedFile Object");
-                }
                 long readPosition = mappedFile.readPosition;
                 long wrotePosition = mappedFile.wrotePosition;
                 if (readPosition != wrotePosition) {
@@ -78,7 +76,14 @@ public class MappedFileManager {
                     //刷盘成功更新指针
                     mappedFile.readPosition = wrotePosition;
                     globalReadPosition += size;
+                } else {
+                    //readPosition == wrotePosition也有可能文件不能写入了
+                    //不能写入原因之一 就是一条数据添加到文件中发现位置不够，因此将本文件设置为不可写入，然后用新的文件写入
+                    if (!mappedFile.isAvailable()) {
+                        globalReadPosition = mappedFile.getFileFromOffset() + mappedFile.getFileSize();
+                    }
                 }
+
                 Thread.sleep(config.getPageFlushLevel());
             }
         } catch (Exception e) {

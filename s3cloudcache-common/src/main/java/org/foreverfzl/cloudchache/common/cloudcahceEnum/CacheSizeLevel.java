@@ -6,7 +6,7 @@ package org.foreverfzl.cloudchache.common.cloudcahceEnum;
  *
  * @author 范泽麟
  */
-public enum ArenaSizeLevel {
+public enum CacheSizeLevel {
 
     /** * 轻量级（256MB）：适合测试环境、侧边栏小服务、或者单条数据极小的边缘业务。
      */
@@ -32,7 +32,7 @@ public enum ArenaSizeLevel {
     // 堆外内存极大，必须使用 long 类型防止 int 越界溢出
     private final long bytes;
 
-    ArenaSizeLevel(long bytes) {
+    CacheSizeLevel(long bytes) {
         this.bytes = bytes;
     }
 

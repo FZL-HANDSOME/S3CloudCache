@@ -2,12 +2,11 @@ package org.foreverfzl.cloudcache.wal.storefile;
 
 
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
-public abstract class ReferenceResource {
+public abstract class MappedFiledReferenceResource {
 
     private final AtomicInteger refCount = new AtomicInteger(0); //目前又多少个线程使用我
-    private volatile boolean available = true; //是否可引用
+    private volatile boolean available = true; //是否可写
     private volatile boolean cleanup = false; //是否要删除这个文件
 
 
@@ -19,7 +18,7 @@ public abstract class ReferenceResource {
         return this.refCount.get();
     }
 
-    //关闭文件
+    //关闭文件写入
     public void close() {
         this.available = false;
     }
