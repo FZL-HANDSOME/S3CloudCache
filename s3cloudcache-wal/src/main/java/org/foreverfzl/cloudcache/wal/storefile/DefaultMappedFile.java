@@ -11,9 +11,13 @@ import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.channels.FileChannel;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+
+import static java.lang.foreign.ValueLayout.JAVA_INT;
 
 
 /**
@@ -46,12 +50,16 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected int blockSize;
     protected long[] blockEndOffsetInMappedFile; //upLoadPosition指针更新辅助数组指针更新辅助数组
     protected AtomicInteger nextUploadBlockIndex = new AtomicInteger(0); //upLoadPosition指针期望下次更新index
+    //引入数组元素的 VarHandle，用于消灭原生数组的内存可见性缺陷
+    private static final VarHandle ARRAY_ELEMENT_HANDLE;
 
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "wrotePosition");
         READ_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "readPosition");
         UPLOAD_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "upLoadPosition");
+        // 初始化原生 long[] 数组的元素句柄
+        ARRAY_ELEMENT_HANDLE = MethodHandles.arrayElementVarHandle(long[].class);
     }
 
     public DefaultMappedFile() {
@@ -109,11 +117,48 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
-
-    // 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针
+    /**
+     * 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针
+     *
+     * @param logicalIndex    当前完成上传的 Block 在本文件内部的逻辑序号 (0, 1, 2...)
+     * @param endOffsetInFile 当前 Block 在文件内部的绝对结束位点 (如 8192, 16384...)
+     */
     public void ackUpLoadPosition(int logicalIndex, long endOffsetInFile) {
-
+        // 边界防御：防止脏数据引发数组越界
+        if (logicalIndex < 0 || logicalIndex >= totalBlockCount) {
+            log.error("Invalid logical index: {}, totalBlockCount: {}", logicalIndex, totalBlockCount);
+            return;
+        }
+        // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
+        ARRAY_ELEMENT_HANDLE.setVolatile(this.blockEndOffsetInMappedFile, logicalIndex, endOffsetInFile);
+        // 2. 级联推进滑窗：尝试多线程无锁并发检查并更新连续下标
+        int currIndex;
+        // 顺着多米诺骨牌的期望线一路向右检查
+        while ((currIndex = nextUploadBlockIndex.get()) < totalBlockCount) {
+            // 3. 利用 VarHandle 的 Volatile 语义读取，防止因缓存延迟读到旧值 0
+            long nextOffset = (long) ARRAY_ELEMENT_HANDLE.getVolatile(this.blockEndOffsetInMappedFile, currIndex);
+            if (nextOffset == 0) {
+                // 核心卡点：当前大盘正在死等的那块骨牌还没传完，滑窗卡住，直接退出
+                break;
+            }
+            // 4. 抢夺骨牌推进权：谁能把期望指针从 currIndex 顶到 currIndex + 1，谁就接管了这一档的推进权
+            if (nextUploadBlockIndex.compareAndSet(currIndex, currIndex + 1)) {
+                // 5. 守护连续性：通过 CAS 自旋把大盘位点顶高到 nextOffset
+                long currentPos;
+                while ((currentPos = UPLOAD_POSITION_UPDATER.get(this)) < nextOffset) {
+                    // 如果大盘位点已经被速度更快的级联线程推得更高了，当前线程的 CAS 就会失败并顺势退出
+                    if (UPLOAD_POSITION_UPDATER.compareAndSet(this, currentPos, nextOffset)) {
+                        break;
+                    }
+                }
+                // 抢到权的线程不能歇着，继续进入下一次 while 循环，检查下一颗骨牌是不是早就被别的网络线程填好了
+            } else {
+                // CAS 失败说明别的线程手快，已经把期望指针推上去了，当前线程继续自旋跟进
+                Thread.onSpinWait(); // 提示 CPU 此时线程处于自旋等待状态，可以适当降低消耗进行优化
+            }
+        }
     }
+
 
     /**
      * 预热 PageCache 并且根据用户配置判断是否锁定映射内存，锁定可以确保其不会被换出到虚拟内存中，也不会被操作系统移动。
@@ -197,10 +242,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
             long magic = slice.get(ValueLayout.JAVA_LONG, pos);
             pos += 8;
 
-            int keyLen = slice.get(ValueLayout.JAVA_INT, pos);
+            int keyLen = slice.get(JAVA_INT, pos);
             pos += 4;
 
-            int valueLen = slice.get(ValueLayout.JAVA_INT, pos);
+            int valueLen = slice.get(JAVA_INT, pos);
             pos += 4;
 
             long checksum = slice.get(ValueLayout.JAVA_LONG, pos);
@@ -282,7 +327,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final WalDataStruct walDataStruct) {
-        if(!isAvailable())return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED,this.fileName);
+        if (!isAvailable()) return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileName);
         // 1. 参数校验
         if (walDataStruct == null) {
             log.warn("appendData: walDataStruct cannot be null, fileName={}", fileName);
@@ -296,31 +341,60 @@ public class DefaultMappedFile extends AbstractMappedFile {
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;
-        do {
+        while (true) {
             currentPos = WROTE_POSITION_UPDATER.get(this);
             newPos = currentPos + msgSize;
             if (newPos > this.fileSize) {
-                // 边界检查：剩余空间不足以容纳本条消息
-                //todo 将本文件设置为不可写入,然后返回END_OF_FILE，之后尝试去新的文件中写
-                close();
-                log.warn("appendData: not enough space, currentPos={}, msgSize={}, fileSize={}, fileName={}",
-                        currentPos, msgSize, this.fileSize, fileName);
+                close(); //文件设置为关闭
                 return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
             }
-        } while (!WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos));
-        //采用空间预留 解耦物理和逻辑Block
-        //先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
-        //todo
+            // 检查该数据是否跨逻辑Block了
+            long blockOffset = currentPos % this.blockSize;
+            long remainingInBlock = this.blockSize - blockOffset;
+            if (msgSize > remainingInBlock) {
+                // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
+                long paddingPos = currentPos + remainingInBlock;
+                if (paddingPos > this.fileSize) {
+                    close();
+                    return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
+                }
+                // 尝试 CAS 抢占这段残渣空间用来做 Padding
+                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                    // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
+                    doPadding(currentPos, (int) remainingInBlock);
+                    // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
+                    continue;
+                }
+                Thread.onSpinWait();
+                continue;
+            }
 
+            if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
+                break;
+            }
+            // CAS失败，提示CPU这是spin等待
+            Thread.onSpinWait();
+        }
+        //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
+        int logicalIndex = Math.toIntExact(newPos / blockSize);
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         AppendMessageResult result = doAppend(currentPos, msgSize, walDataStruct);
-
+        result.setLogicalIndex(logicalIndex);
         if (!result.isOk()) {
             // 写入失败，这一部分文件内容会用无效的字节填充
             log.error("appendData: doAppend failed, result={}, attempting to rollback wrotePosition", result);
             return result;
         }
         return result;
+    }
+
+    private void doPadding(long startPos, int length) {
+        // 假设你的 WalDataStruct 魔数是特定的，我们这里用一个绝对不会撞车的 PADDING_MAGIC
+        // 只需要在残渣的开头写 8 个字节，后面的空间根本不需要去 fill(0)！
+        MemorySegment segment = mappedMemorySegment.asSlice(startPos, length);
+        segment.set(JAVA_INT,0,PaddingStruct.PADDING_MAGIC);
+        segment.set(JAVA_INT,4,length);
+        // 性能开销几乎为 0，同时完美解决了文件自解析和读取器阻塞的问题
     }
 
     /**
@@ -350,7 +424,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
             // 2. Key Length
             targetSlice.set(
-                    ValueLayout.JAVA_INT,
+                    JAVA_INT,
                     pos,
                     walDataStruct.getKeyLen()
             );
@@ -358,7 +432,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
             // 3. Value Length
             targetSlice.set(
-                    ValueLayout.JAVA_INT,
+                    JAVA_INT,
                     pos,
                     walDataStruct.getValueLen()
             );

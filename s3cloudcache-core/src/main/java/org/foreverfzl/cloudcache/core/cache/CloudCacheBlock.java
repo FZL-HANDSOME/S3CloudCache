@@ -22,7 +22,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     //为了保证每个Block里面只能存放一个WAL文件的数据，如果为null说明该Block里面没有数据，否则代表该Block存放了对应文件的数据
     private DefaultMappedFile mappedFile;
     private volatile int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
-    private volatile long endOffsetInMappedFile;
+    private volatile long endOffsetInMappedFile; //由最后一个写入线程修改
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
@@ -35,7 +35,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     }
 
     /**
-     * 业务线程完成写入后的收尾逻辑
+     * 业务线程完成写入后的收尾逻辑，修改Block的各个信息
      */
     public void releaseReference() {
         // 1. 递减当前正在写入的线程数
@@ -47,10 +47,12 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
             long blockBaseOffsetInFile = (long) this.logicalIndex * this.blockSize;
             // 最终在 MappedFile 中的绝对结束位点 = 起始位点 + 堆外内存实际写入的物理长度
             this.endOffsetInMappedFile = blockBaseOffsetInFile + this.writePosition;
-            // 3. 此时该 Block 彻底固化，正式提交给异步线程池上云
-            //todo 上传服务器
-
         }
+    }
+
+    @Override
+    public int getReference() {
+        return this.refCount.incrementAndGet();
     }
 
     public long getBlockId() {

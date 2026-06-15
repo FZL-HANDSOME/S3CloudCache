@@ -57,6 +57,11 @@ public class AppendMessageResult {
      */
     private final String fileName;
 
+    /**
+     * 该数据在改文件的哪逻辑Block中
+     */
+    private int logicalIndex;
+
 
     public AppendMessageResult(AppendStatus status, String fileName) {
         this.status = status;
@@ -64,6 +69,7 @@ public class AppendMessageResult {
         wroteOffset = -1;
         wroteBytes = -1;
         storeTimestamp = -1;
+        logicalIndex = -1;
     }
 
     public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
@@ -73,6 +79,17 @@ public class AppendMessageResult {
         this.wroteBytes = wroteBytes;
         this.storeTimestamp = storeTimestamp;
         this.fileName = fileName;
+        logicalIndex = -1;
+    }
+
+    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes, long storeTimestamp,
+                               String fileName, int logicalIndex, long endOffsetInMappedFile) {
+        this.status = status;
+        this.wroteOffset = wroteOffset;
+        this.wroteBytes = wroteBytes;
+        this.storeTimestamp = storeTimestamp;
+        this.fileName = fileName;
+        this.logicalIndex = logicalIndex;
     }
 
     /**
@@ -107,6 +124,14 @@ public class AppendMessageResult {
 
     public String getFileName() {
         return fileName;
+    }
+
+    public int getLogicalIndex() {
+        return logicalIndex;
+    }
+
+    public void setLogicalIndex(int logicalIndex) {
+        this.logicalIndex = logicalIndex;
     }
 
     @Override

@@ -7,7 +7,7 @@ import java.util.zip.CRC32;
 /**
  * 磁盘持久化协议格式
  */
-public class WalDataStruct {
+public final class WalDataStruct {
     //+----------------+---------------+--------------+------------------+-----------------+-------------------+
     //| Magic (8B)     | Key Len (4B)  | Value Len(4B)| Checksum (8B)    |   Key Bytes     |    Value Bytes    |
     //+----------------+---------------+--------------+------------------+-----------------+-------------------+
