@@ -35,7 +35,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
-
+    protected final String instanceName;
 
     protected File file;
     protected String filePath;
@@ -62,12 +62,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
         ARRAY_ELEMENT_HANDLE = MethodHandles.arrayElementVarHandle(long[].class);
     }
 
-    public DefaultMappedFile() {
 
-    }
 
-    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, final long fileSize, final int blockSize) {
+    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, String instanceName, final long fileSize, final int blockSize) {
         this.fileName = fileName;
+        this.instanceName = instanceName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
         this.filePath = filePath;
@@ -95,7 +94,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
         try {
             // 创建目录
-            File dir = new File(filePath);
+            String realPath=filePath+File.separator+instanceName;
+            File dir = new File(realPath);
             if (!dir.exists() && !dir.mkdirs()) {
                 throw new WalException("Failed to create directory: " + dir);
             }

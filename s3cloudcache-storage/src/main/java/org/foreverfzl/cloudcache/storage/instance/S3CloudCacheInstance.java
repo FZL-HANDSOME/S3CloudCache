@@ -1,5 +1,6 @@
 package org.foreverfzl.cloudcache.storage.instance;
 
+import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -17,6 +18,10 @@ public class S3CloudCacheInstance {
      * 持久化WAL文件管理者
      */
     private MappedFileManager mappedFileManager;
+    /**
+     * Cache的管理者
+     */
+    private CacheBlockManager cacheBlockManager;
 
     private S3Client s3Client;
 
