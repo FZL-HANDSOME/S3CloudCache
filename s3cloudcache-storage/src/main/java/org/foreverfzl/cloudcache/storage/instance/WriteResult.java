@@ -1,4 +1,4 @@
-package org.foreverfzl.cloudcache.storage.factory;
+package org.foreverfzl.cloudcache.storage.instance;
 
 /**
  * 上层调用我们的API，我们返回该对象

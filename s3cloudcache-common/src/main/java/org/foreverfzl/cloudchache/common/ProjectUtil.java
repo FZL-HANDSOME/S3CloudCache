@@ -20,8 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class ProjectUtil {
     //用户目录
     public static final String USER_HOME = System.getProperty("user.home");
-    //磁盘持久化地址
-    public static final String DEFAULT_DISK_PERSISTENT_ADDRESS = USER_HOME + File.separator + ".cloudcache" + File.separator + "store"+File.separator;
+    public static final String WAL_FILE_ADDRESS=File.separator+"CloudCache"+File.separator+"store";
 
     public static final Unsafe UNSAFE;
     //操作系统页大小

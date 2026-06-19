@@ -1,21 +1,21 @@
-//package org.foreverfzl.cloudcache.wal.storefile;
-//
-//import org.foreverfzl.cloudcache.wal.storefile.WalDataStruct;
-//
-//import java.nio.charset.StandardCharsets;
-//import java.util.*;
-//import java.util.concurrent.*;
-//
-//
-//
-//public class DefaultMappedFileText {
-//
-//    static void main() throws Exception {
-//        testConcurrentWriteThenRead();
-////        textAppend();
-//    }
-//
-//
+package org.foreverfzl.cloudcache.wal.storefile;
+
+import org.foreverfzl.cloudcache.wal.storefile.WalDataStruct;
+import org.foreverfzl.cloudchache.common.ProjectUtil;
+
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.*;
+
+
+
+public class DefaultMappedFileText {
+
+    static void main() throws Exception {
+        System.out.println(ProjectUtil.USER_HOME);
+    }
+
+
 //    /**
 //     * 测试文件的append和get和clean
 //     */
@@ -256,5 +256,5 @@
 //        );
 //        mappedFile.clean();
 //    }
-//}
-//
+}
+

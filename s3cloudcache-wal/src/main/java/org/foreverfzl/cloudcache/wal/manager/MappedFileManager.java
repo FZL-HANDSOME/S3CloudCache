@@ -7,17 +7,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 
+import java.io.File;
 import java.lang.foreign.MemorySegment;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 /**
- * 这个类专门管理目前存在的文件，创建、维护等
- * 责任：
- * 1：刷盘确认readPosition
+ * 这个类专门管理该Bucket存在的文件
  */
-public class MappedFileManager {
+public class MappedFileManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
+    public final String instanceName;
+    public final String bucketName;
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
     //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
@@ -28,11 +29,16 @@ public class MappedFileManager {
     private final Thread chackMappedFileThread;
     //主要控制线程flushReadPosition、chackMappedFile等的执行
     private volatile boolean active = true;
+    //操作系统脏页刷新时间，也就是globalReadPosition的刷新时间
+    private final long pageFlushTime;
+    //该bucket的wal目录绝对地址
+    private final String dirPath;
 
-
-    private S3CloudCacheConfig config;
-
-    public MappedFileManager() {
+    public MappedFileManager(String instanceName,String dirPath,String bucketName, long pageFlushTime) {
+        this.instanceName = instanceName;
+        this.bucketName = bucketName;
+        this.dirPath=dirPath;
+        this.pageFlushTime = pageFlushTime;
         flushReadPositionThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -61,7 +67,7 @@ public class MappedFileManager {
                 if (entry == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
                     log.warn("flushReadPositionTask failed: can not find `{}` DefaultMappedFile Object", globalReadPosition);
-                    Thread.sleep(config.getPageFlushLevel());
+                    Thread.sleep(pageFlushTime);
                     continue;
                 }
                 DefaultMappedFile mappedFile = entry.getValue();
@@ -84,7 +90,7 @@ public class MappedFileManager {
                     }
                 }
 
-                Thread.sleep(config.getPageFlushLevel());
+                Thread.sleep(pageFlushTime);
             }
         } catch (Exception e) {
             log.error(e.getMessage());
@@ -95,4 +101,9 @@ public class MappedFileManager {
 
     }
 
+    //todo
+    @Override
+    public void close() throws Exception {
+
+    }
 }

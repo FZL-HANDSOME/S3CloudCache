@@ -5,6 +5,9 @@ package org.foreverfzl.cloudcache.core.cache;
  * @param offset 2. 这条业务数据在这个 5MB 大块内部的“绝对起始字节偏移量”
  * @param size   3. 这条业务数据的“总长度”（Header + Payload）
  */
-public record AppendDataResult(String s3Key, int offset, int size, boolean result) {
+public record AppendDataResult(String s3Key, long offset, int size, boolean result) {
 
+    public static AppendDataResult fail() {
+        return new AppendDataResult(null, -1, -1, false);
+    }
 }

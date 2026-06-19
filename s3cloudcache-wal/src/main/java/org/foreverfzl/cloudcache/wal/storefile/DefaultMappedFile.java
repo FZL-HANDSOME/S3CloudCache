@@ -1,5 +1,6 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
+import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.exception.WalException;
@@ -35,10 +36,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
-    protected final String instanceName;
+    private final MappedFileManager manager;
 
     protected File file;
-    protected String filePath;
+    protected String dirPath;
     protected String fileName;
     protected long fileSize;
     protected FileChannel fileChannel;
@@ -64,13 +65,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
 
-    public DefaultMappedFile(final String filePath, final String fileName, final long fileFromOffset, String instanceName, final long fileSize, final int blockSize) {
+    public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
+                             final long fileSize, final int blockSize, MappedFileManager manager) {
         this.fileName = fileName;
-        this.instanceName = instanceName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
-        this.filePath = filePath;
+        this.dirPath = dirPath;
         this.blockSize = blockSize;
+        this.manager=manager;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
@@ -86,7 +88,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         if (fileName == null || fileName.isBlank()) {
             throw new WalException("fileName cannot be null");
         }
-        if (filePath == null || filePath.isBlank()) {
+        if (dirPath == null || dirPath.isBlank()) {
             throw new WalException("fileName cannot be null");
         }
         if (fileSize <= 0) {
@@ -94,14 +96,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
         try {
             // 创建目录
-            String realPath=filePath+File.separator+instanceName;
-            File dir = new File(realPath);
+            File dir = new File(dirPath);
             if (!dir.exists() && !dir.mkdirs()) {
                 throw new WalException("Failed to create directory: " + dir);
             }
             // 创建文件对象
             this.file = new File(dir, fileName);
-
             // 创建文件并设置大小
             RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
             randomAccessFile.setLength(fileSize);
@@ -368,7 +368,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 Thread.onSpinWait();
                 continue;
             }
-
             if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
                 break;
             }
@@ -380,11 +379,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         AppendMessageResult result = doAppend(currentPos, msgSize, walDataStruct);
         result.setLogicalIndex(logicalIndex);
-        if (!result.isOk()) {
-            // 写入失败，这一部分文件内容会用无效的字节填充
-            log.error("appendData: doAppend failed, result={}, attempting to rollback wrotePosition", result);
-            return result;
-        }
         return result;
     }
 
@@ -495,7 +489,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             file.delete();
         } catch (Exception e) {
             throw new WalException(
-                    "Failed to Clean Filed: " + filePath + File.separator + fileName, e
+                    "Failed to Clean Filed: " + dirPath + File.separator + fileName, e
             );
         }
     }

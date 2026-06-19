@@ -6,6 +6,14 @@ package org.foreverfzl.cloudcache.wal.storefile;
  */
 public class AppendMessageResult {
 
+    public int getBlockExpectedValidBytes() {
+        return blockExpectedValidBytes;
+    }
+
+    public void setBlockExpectedValidBytes(int blockExpectedValidBytes) {
+        this.blockExpectedValidBytes = blockExpectedValidBytes;
+    }
+
     /**
      * 追加写入的状态枚举
      */
@@ -62,6 +70,8 @@ public class AppendMessageResult {
      */
     private int logicalIndex;
 
+    private int blockExpectedValidBytes;
+
 
     public AppendMessageResult(AppendStatus status, String fileName) {
         this.status = status;
@@ -70,6 +80,7 @@ public class AppendMessageResult {
         wroteBytes = -1;
         storeTimestamp = -1;
         logicalIndex = -1;
+        blockExpectedValidBytes = -1;
     }
 
     public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
@@ -80,16 +91,18 @@ public class AppendMessageResult {
         this.storeTimestamp = storeTimestamp;
         this.fileName = fileName;
         logicalIndex = -1;
+        blockExpectedValidBytes = -1;
     }
 
-    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes, long storeTimestamp,
-                               String fileName, int logicalIndex, long endOffsetInMappedFile) {
+    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
+                               long storeTimestamp, String fileName, int logicalIndex, int blockExpectedValidBytes) {
         this.status = status;
         this.wroteOffset = wroteOffset;
         this.wroteBytes = wroteBytes;
         this.storeTimestamp = storeTimestamp;
         this.fileName = fileName;
         this.logicalIndex = logicalIndex;
+        this.blockExpectedValidBytes = blockExpectedValidBytes;
     }
 
     /**

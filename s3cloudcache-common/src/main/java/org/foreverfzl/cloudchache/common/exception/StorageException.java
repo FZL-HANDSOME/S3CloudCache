@@ -7,10 +7,7 @@ public class StorageException extends CloudCacheException{
     }
 
 
-    public StorageException(
-            String message,
-            Throwable cause
-    ) {
+    public StorageException(String message, Throwable cause) {
         super(message,cause);
     }
 }
