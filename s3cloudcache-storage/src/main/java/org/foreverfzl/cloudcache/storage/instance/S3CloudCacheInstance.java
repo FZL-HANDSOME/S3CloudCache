@@ -1,13 +1,11 @@
 package org.foreverfzl.cloudcache.storage.instance;
 
-import org.foreverfzl.cloudcache.core.global.CoreInstanceBucketManager;
-import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
-import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
-import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import software.amazon.awssdk.services.s3.S3Client;
 
-public class S3CloudCacheInstance {
+import java.nio.ByteBuffer;
+
+public class S3CloudCacheInstance implements Instance{
     /**
      * 名字一定要唯一并且不要更改
      */
@@ -38,5 +36,21 @@ public class S3CloudCacheInstance {
         this.cacheConfig = cacheConfig;
         this.instanceName = instanceName;
 
+    }
+
+
+    @Override
+    public WriteResult write(String bucketName, String objectPrefix, byte[] data, int offset, int length) {
+        return null;
+    }
+
+    @Override
+    public WriteResult write(String bucketName, String objectPrefix, byte[] data) {
+        return null;
+    }
+
+    @Override
+    public WriteResult write(String bucketName, String objectPrefix, ByteBuffer buffer) {
+        return null;
     }
 }

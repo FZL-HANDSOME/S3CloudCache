@@ -13,7 +13,7 @@ public class WalInstanceBucketManager {
     private final ConcurrentHashMap<String, MappedFileManager> managerHashMap;
     private final String instanceName;
     private final S3CloudCacheConfig.WalConfig config;
-    //用户指定的地址
+    //用户指定的地址，如果用户没有指定则为默认
     private final String instanceDirPath;
 
     private final ReentrantLock[] locks;
@@ -32,10 +32,15 @@ public class WalInstanceBucketManager {
         }
     }
 
+
+    public void appendData(){
+
+    }
+
     /**
      * 根据bucket获取对应的MappedFileManager
      */
-    public MappedFileManager getBlockManager(String bucketName) {
+    private MappedFileManager getBucketBlockManager(String bucketName) {
         // 第一次无锁查询
         MappedFileManager manager = managerHashMap.get(bucketName);
         if (manager != null) {

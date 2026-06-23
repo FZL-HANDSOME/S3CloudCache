@@ -64,7 +64,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
 
-
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
                              final long fileSize, final int blockSize, MappedFileManager manager) {
         this.fileName = fileName;
@@ -72,12 +71,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.fileFromOffset = fileFromOffset;
         this.dirPath = dirPath;
         this.blockSize = blockSize;
-        this.manager=manager;
+        this.manager = manager;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
         init();
     }
+
 
     /**
      * 创建并初始化WAL文件，并且将channel、指针等初始化
@@ -191,6 +191,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 mappedMemorySegment.force();
             }
         }
+        //todo 还不知道是否真正能锁定内存
 //        //根据用户选择是否锁定内存
 //        if (S3CloudCacheConfig.getIsLockMappedFilePageCache()) {
 //            ProjectUtil.lockMemory(this.mappedMemorySegment);
@@ -200,16 +201,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     /**
      * 从该文件中读取指定区域的数据，并反序列化为 WalDataStruct 对象。
-     * <p>
-     * 读取方式与 doAppend 的写入方式对称：
-     * 1. 从 mappedMemorySegment 中按字段逐个读取 Header（Magic、KeyLen、ValueLen、Checksum）
-     * 2. 批量拷贝 KeyBytes 和 ValueBytes
-     * 3. 校验 Magic 和 CRC32，确保数据完整性
-     * </p>
-     *
-     * @param readOffset 起始位置（相对于文件起始的偏移量）
-     * @param size       要读取的字节数（应 >= WalDataStruct.HEADER_LENGTH + keyLen + valueLen）
-     * @return 反序列化后的 WalDataStruct 对象，读取失败时返回 null
      */
     @Override
     public WalDataStruct getData(long readOffset, long size) {
@@ -218,14 +209,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
             log.warn("getData: invalid parameters, readOffset={}, size={}", readOffset, size);
             return null;
         }
-
         // 至少需要能容纳协议头部
         if (size < WalDataStruct.HEADER_LENGTH) {
             log.warn("getData: size={} is less than HEADER_LENGTH={}, fileName={}",
                     size, WalDataStruct.HEADER_LENGTH, fileName);
             return null;
         }
-
         // 边界检查：确保读取范围不超过已写入区域
         long currentWrotePosition = WROTE_POSITION_UPDATER.get(this);
         if (readOffset + size > currentWrotePosition) {
@@ -238,18 +227,18 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // 2. 切片出目标区域，与 doAppend 对称，slice 内部偏移从 0 开始
             MemorySegment slice = mappedMemorySegment.asSlice(readOffset, size);
             long pos = 0;
-            // 读取 Header 字段
-            long magic = slice.get(ValueLayout.JAVA_LONG, pos);
-            pos += 8;
 
-            int keyLen = slice.get(JAVA_INT, pos);
+            int magic = slice.get(JAVA_INT, pos);
+            pos += 4;
+
+            int version = slice.get(JAVA_INT, pos);
+            pos += 4;
+
+            int checksum = slice.get(JAVA_INT, pos);
             pos += 4;
 
             int valueLen = slice.get(JAVA_INT, pos);
             pos += 4;
-
-            long checksum = slice.get(ValueLayout.JAVA_LONG, pos);
-            pos += 8;
 
             // 3. 校验魔数
             if (magic != WalDataStruct.MAGIC_NUMBER) {
@@ -258,31 +247,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 return null;
             }
 
-            // 4. 校验数据长度是否合法
-            if (keyLen < 0 || valueLen < 0) {
-                log.warn("getData: invalid keyLen={} or valueLen={} at readOffset={}, fileName={}",
-                        keyLen, valueLen, readOffset, fileName);
-                return null;
-            }
-            if (WalDataStruct.HEADER_LENGTH + keyLen + valueLen > size) {
-                log.warn("getData: data length (header={} + keyLen={} + valueLen={}) exceeds read size={}, fileName={}",
-                        WalDataStruct.HEADER_LENGTH, keyLen, valueLen, size, fileName);
-                return null;
-            }
-
-            // 5. 批量拷贝 Key 字节数组
-            byte[] keyBytes = new byte[keyLen];
-            MemorySegment.copy(
-                    slice,
-                    ValueLayout.JAVA_BYTE,
-                    pos,
-                    keyBytes,
-                    0,
-                    keyLen
-            );
-            pos += keyLen;
-
-            // 6. 批量拷贝 Value 字节数组
+            // 批量拷贝 Value 字节数组
             byte[] valueBytes = new byte[valueLen];
             MemorySegment.copy(
                     slice,
@@ -294,7 +259,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             );
 
             // 7. 构造 WalDataStruct 并返回（构造方法内含 CRC32 校验逻辑）
-            return new WalDataStruct(magic, keyLen, valueLen, checksum, keyBytes, valueBytes);
+            return new WalDataStruct(magic, version, checksum, valueLen, valueBytes);
         } catch (Exception e) {
             log.error("getData: failed to read data from file={}, readOffset={}, size={}",
                     fileName, readOffset, size, e);
@@ -302,16 +267,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
-    /**
-     * 获取一条完整数据
-     *
-     * @param readOffset 起始位置
-     * @return
-     */
-    @Override
-    public WalDataStruct getData(long readOffset) {
-        return null;
-    }
 
     /**
      * 往该文件中追加数据（并发安全）。
@@ -386,8 +341,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         // 假设你的 WalDataStruct 魔数是特定的，我们这里用一个绝对不会撞车的 PADDING_MAGIC
         // 只需要在残渣的开头写 8 个字节，后面的空间根本不需要去 fill(0)！
         MemorySegment segment = mappedMemorySegment.asSlice(startPos, length);
-        segment.set(JAVA_INT,0,PaddingStruct.PADDING_MAGIC);
-        segment.set(JAVA_INT,4,length);
+        segment.set(JAVA_INT, 0, PaddingStruct.PADDING_MAGIC);
+        segment.set(JAVA_INT, 4, length);
         // 性能开销几乎为 0，同时完美解决了文件自解析和读取器阻塞的问题
     }
 
@@ -408,23 +363,31 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             long pos = 0;
-            // 1. Magic
-            targetSlice.set(
-                    ValueLayout.JAVA_LONG,
-                    pos,
-                    walDataStruct.getMagic()
-            );
-            pos += 8;
-
-            // 2. Key Length
+            //  Magic
             targetSlice.set(
                     JAVA_INT,
                     pos,
-                    walDataStruct.getKeyLen()
+                    walDataStruct.getMagic()
             );
             pos += 4;
 
-            // 3. Value Length
+            //version
+            targetSlice.set(
+                    JAVA_INT,
+                    pos,
+                    walDataStruct.getVersion()
+            );
+            pos += 4;
+
+            // CRC32
+            targetSlice.set(
+                    JAVA_INT,
+                    pos,
+                    walDataStruct.getChecksum()
+            );
+            pos += 4;
+
+            // Value Length
             targetSlice.set(
                     JAVA_INT,
                     pos,
@@ -432,28 +395,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             );
             pos += 4;
 
-            // 4. CRC32
-            targetSlice.set(
-                    ValueLayout.JAVA_LONG,
-                    pos,
-                    walDataStruct.getChecksum()
-            );
-            pos += 8;
-
-            // 5. Key Bytes
-            byte[] keyBytes = walDataStruct.getKeyBytes();
-            MemorySegment.copy(
-                    keyBytes,
-                    0,
-                    targetSlice,
-                    ValueLayout.JAVA_BYTE,
-                    pos,
-                    keyBytes.length
-            );
-
-            pos += keyBytes.length;
-
-            // 6. Value Bytes
+            // Value Bytes
             byte[] valueBytes = walDataStruct.getValueBytes();
             MemorySegment.copy(
                     valueBytes,

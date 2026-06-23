@@ -13,12 +13,30 @@ public interface MappedFile {
      */
     public void warm(int pages);
 
+    /**
+     * 读取该文件数据
+     *
+     * @param readOffset 起始位置
+     * @param size       文件大小
+     * @return
+     */
+    public WalDataStruct getData(final long readOffset, final long size);
+
+    /**
+     *
+     * @param walDataStruct 磁盘持久化协议格式
+     * @return
+     */
+    public AppendMessageResult appendData(final WalDataStruct walDataStruct);
+
+
     String getFileName();
 
     FileChannel getFileChannel();
 
     /**
      * 检查文件是否可用
+     *
      * @return
      */
     boolean isAvailable();
@@ -34,45 +52,27 @@ public interface MappedFile {
      */
     public void delete();
 
-    /**、
+    /**
+     * 、
      * 释放文件的引用
+     *
      * @return
      */
     public int release();
 
     /**
      * 真正的清除该文件
+     *
      * @return
      */
     public abstract void clean();
 
     /**
      * 获取该文件的引用
+     *
      * @return
      */
     public int hold();
-
-    /**
-     * 读取该文件数据
-     * @param readOffset 起始位置
-     * @param size 文件大小
-     * @return
-     */
-    public WalDataStruct getData(final long readOffset, final long size);
-
-    /**
-     * 读取该文件数据
-     * @param readOffset 起始位置
-     * @return
-     */
-    public WalDataStruct getData(long readOffset);
-
-    /**
-     *
-     * @param walDataStruct 磁盘持久化协议格式
-     * @return
-     */
-    public AppendMessageResult appendData(final WalDataStruct walDataStruct);
 
 
 }

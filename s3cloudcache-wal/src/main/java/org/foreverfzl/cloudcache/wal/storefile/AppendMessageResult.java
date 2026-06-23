@@ -46,6 +46,12 @@ public class AppendMessageResult {
     private final AppendStatus status;
 
     /**
+     * 写入的目标文件名
+     */
+    private final String fileName;
+
+
+    /**
      * 数据写入的起始偏移量（相对于文件起始）
      */
     private final long wroteOffset;
@@ -61,15 +67,12 @@ public class AppendMessageResult {
     private final long storeTimestamp;
 
     /**
-     * 写入的目标文件名
-     */
-    private final String fileName;
-
-    /**
      * 该数据在改文件的哪逻辑Block中
      */
     private int logicalIndex;
-
+    /**
+     * 该Block的期望字节数，Block上传的时候会根据这个字段判断是否可以上传
+     */
     private int blockExpectedValidBytes;
 
 
