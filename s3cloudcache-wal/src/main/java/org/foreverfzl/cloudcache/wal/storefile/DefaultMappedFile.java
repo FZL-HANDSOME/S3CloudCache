@@ -65,7 +65,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
-                             final long fileSize, final int blockSize, MappedFileManager manager) {
+                             final long fileSize, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
@@ -75,7 +75,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
-        init();
+        init(isWarm, isLockMemory);
     }
 
 
@@ -84,7 +84,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      *
      */
     @Override
-    public void init() {
+    public void init(boolean isWarm, boolean isLockMemory) {
         if (fileName == null || fileName.isBlank()) {
             throw new WalException("fileName cannot be null");
         }
@@ -107,9 +107,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
             randomAccessFile.setLength(fileSize);
             fileChannel = randomAccessFile.getChannel();
             mappedMemorySegment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, fileSize, arena);
-
-            //进行文件预热，每16384页刷盘一次，防止脏页过多
-            warm(16384);
+            if (isWarm) {
+                //进行文件预热，每16384页刷盘一次，防止脏页过多
+                warm(16384, isLockMemory);
+            }
         } catch (Exception e) {
             throw new WalException(
                     "Failed to initialize cache file: " + fileName, e
@@ -166,7 +167,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      * @param pages 预热多少页后就执行一次强制刷盘
      */
     @Override
-    public void warm(int pages) {
+    public void warm(int pages, boolean isLockMemory) {
         if (mappedMemorySegment == null) {
             throw new WalException("mappedMemorySegment has not been mapped yet.");
         }
@@ -192,10 +193,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
             }
         }
         //todo 还不知道是否真正能锁定内存
-//        //根据用户选择是否锁定内存
-//        if (S3CloudCacheConfig.getIsLockMappedFilePageCache()) {
-//            ProjectUtil.lockMemory(this.mappedMemorySegment);
-//        }
+        //根据用户选择是否锁定内存
+        if (isLockMemory) {
+            ProjectUtil.lockMappedPages(this.mappedMemorySegment);
+        }
     }
 
 
@@ -304,7 +305,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
             }
             // 检查该数据是否跨逻辑Block了
-            long blockOffset = currentPos % this.blockSize;
+            long blockOffset = currentPos & (this.blockSize - 1);
             long remainingInBlock = this.blockSize - blockOffset;
             if (msgSize > remainingInBlock) {
                 // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）

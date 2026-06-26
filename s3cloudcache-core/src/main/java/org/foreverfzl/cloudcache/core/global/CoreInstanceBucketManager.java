@@ -15,13 +15,13 @@ public class CoreInstanceBucketManager {
     private final ConcurrentHashMap<String, CacheBlockManager> managerHashMap;
 
     private static final int LOCKS_COUNT = 128;
-    private final ReentrantLock[] locks;
+    private final ReentrantLock[] locks; //保证同一时刻只有一个线程创建Manager
     private final String instanceName;
     private final S3Client s3Client;
-    private final S3CloudCacheConfig.CacheConfig config;
+    private final S3CloudCacheConfig config;
 
 
-    public CoreInstanceBucketManager(String instanceName, S3Client s3Client, S3CloudCacheConfig.CacheConfig config) {
+    public CoreInstanceBucketManager(String instanceName, S3Client s3Client, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.s3Client = s3Client;
         this.config = config;
@@ -35,7 +35,7 @@ public class CoreInstanceBucketManager {
     /**
      * 根据bucket获取对应的BlockManager
      */
-    public CacheBlockManager getBlockManager(String bucketName) {
+    private CacheBlockManager getBlockManager(String bucketName,String prefix) {
         // 第一次无锁查询
         CacheBlockManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -51,7 +51,7 @@ public class CoreInstanceBucketManager {
                 return manager;
             }
             // 创建新的BlockManager
-            manager = new CacheBlockManager(config.cacheSize, config.blockSize, config.blockUpLoadCount, instanceName, bucketName, s3Client);
+            manager = new CacheBlockManager(config.getCacheConfig().cacheSize, config.getCacheConfig().blockSize, config.getCacheConfig().blockUpLoadCount, instanceName, bucketName,prefix, s3Client);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {

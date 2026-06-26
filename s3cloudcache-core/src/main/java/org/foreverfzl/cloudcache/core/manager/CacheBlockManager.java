@@ -28,25 +28,27 @@ public class CacheBlockManager implements AutoCloseable {
     private final int blockCount;
     public final String instanceName;
     public final String bucketName;
+    public final String prefix;
 
 
     // 空闲/干净的 CloudCacheBlock 池
     private final BlockingQueue<CloudCacheBlock> freeBlocks;
 
-    // 根据自定义 key 维护的 K-V 映射
+    // 根据自定义 key 维护的 K-V 映射，key为fileName+BlockIndex
     private final ConcurrentHashMap<String, CloudCacheBlock> keyBlockMap;
 
     //block上传者
     private final CacheBlockUpdater blockUpdater;
 
 
-    public CacheBlockManager(long cacheSize, int blockSize, int blockUpLoadMaxCount, String instanceName, String bucketName, S3Client s3Client) {
+    public CacheBlockManager(long cacheSize, int blockSize, int blockUpLoadMaxCount, String instanceName, String bucketName, String prefix, S3Client s3Client) {
         if (cacheSize <= 0 || blockSize <= 0) {
             throw new IllegalArgumentException("cacheSize and blockSize must be greater than 0");
         }
         if (cacheSize < blockSize) {
             throw new IllegalArgumentException("cacheSize must be greater than or equal to blockSize");
         }
+        this.prefix = prefix;
         this.cacheSize = cacheSize;
         this.blockSize = blockSize;
         this.blockCount = (int) (cacheSize / blockSize);
@@ -82,7 +84,7 @@ public class CacheBlockManager implements AutoCloseable {
         try {
             data = dataStruct.getData();
             size = data.length;
-            cacheBlock = getBlock(dataStruct.getBlockKey());
+            cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
@@ -118,10 +120,8 @@ public class CacheBlockManager implements AutoCloseable {
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
-    private CloudCacheBlock getBlock(String cacheBlockKey) throws InterruptedException {
-        if (cacheBlockKey == null || cacheBlockKey.isEmpty()) {
-            throw new IllegalArgumentException("Key cannot be null or empty");
-        }
+    private CloudCacheBlock getBlock(String fileName, int blockIndex) throws InterruptedException {
+        String cacheBlockKey = fileName + "_" + blockIndex;
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
         if (existingBlock != null) {
@@ -135,7 +135,7 @@ public class CacheBlockManager implements AutoCloseable {
             }
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
-            block.setS3Key(ProjectUtil.generateUniqueS3Key(instanceName));
+            block.setS3Key(ProjectUtil.generateUniqueS3Key(this.prefix, this.instanceName, this.bucketName, fileName, blockIndex));
             keyBlockMap.put(cacheBlockKey, block);
             return block;
         }

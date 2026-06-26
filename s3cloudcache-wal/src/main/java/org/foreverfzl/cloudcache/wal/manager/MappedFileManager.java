@@ -1,6 +1,8 @@
 package org.foreverfzl.cloudcache.wal.manager;
 
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudcache.wal.storefile.WalDataStruct;
+import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
@@ -19,6 +21,10 @@ public class MappedFileManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
     public final String instanceName;
     public final String bucketName;
+    private final String prefix; //用户自定义的前缀，用于生成S3key
+    //前缀文件引用
+    private final DefaultMappedFile prefixMappedFile;
+
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
     //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
@@ -33,12 +39,19 @@ public class MappedFileManager implements AutoCloseable {
     private final long pageFlushTime;
     //该bucket的wal目录绝对地址
     private final String dirPath;
+    private final long fileSize;
+    private final int blockSize;
 
-    public MappedFileManager(String instanceName,String dirPath,String bucketName, long pageFlushTime) {
+    public MappedFileManager(String prefix,String dirPath,String instanceName, String bucketName, long pageFlushTime,
+                             long fileSize,int blockSize) {
+        this.prefix = prefix;
         this.instanceName = instanceName;
         this.bucketName = bucketName;
-        this.dirPath=dirPath;
+        this.dirPath = dirPath;
         this.pageFlushTime = pageFlushTime;
+        this.fileSize=fileSize;
+        this.blockSize=blockSize;
+        this.prefixMappedFile=walPrefix(prefix);
         flushReadPositionThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -94,6 +107,13 @@ public class MappedFileManager implements AutoCloseable {
         } catch (Exception e) {
             log.error(e.getMessage());
         }
+    }
+
+    //将prefix持久化，只有创建新的MappedFileManager的时候(也就是新的Bucket)才会持久化prefix
+    private DefaultMappedFile walPrefix(String prefix) {
+        DefaultMappedFile file=new DefaultMappedFile(dirPath, ProjectUtil.PREFIX_FILE_NAME,0, 1024 * 1024,blockSize,false,false,this);
+        file.appendData(new WalDataStruct(prefix));
+        return file;
     }
 
     public void chackMappedFileTask() {

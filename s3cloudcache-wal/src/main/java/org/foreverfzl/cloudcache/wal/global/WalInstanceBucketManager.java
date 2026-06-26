@@ -12,17 +12,17 @@ public class WalInstanceBucketManager {
     private static final int LOCKS_COUNT = 128;
     private final ConcurrentHashMap<String, MappedFileManager> managerHashMap;
     private final String instanceName;
-    private final S3CloudCacheConfig.WalConfig config;
+    private final S3CloudCacheConfig config;
     //用户指定的地址，如果用户没有指定则为默认
     private final String instanceDirPath;
 
     private final ReentrantLock[] locks;
 
-    public WalInstanceBucketManager(String instanceName,String instanceDirPath, S3CloudCacheConfig.WalConfig config) {
+    public WalInstanceBucketManager(String instanceName,String instanceDirPath, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.config = config;
-        this.instanceDirPath=config.walPath!=null?
-                config.walPath+ProjectUtil.WAL_FILE_ADDRESS:
+        this.instanceDirPath=config.getWalConfig().walPath!=null?
+                config.getWalConfig().walPath+ProjectUtil.WAL_FILE_ADDRESS:
                 ProjectUtil.USER_HOME+ProjectUtil.WAL_FILE_ADDRESS;
 
         managerHashMap = new ConcurrentHashMap<>();
@@ -40,7 +40,7 @@ public class WalInstanceBucketManager {
     /**
      * 根据bucket获取对应的MappedFileManager
      */
-    private MappedFileManager getBucketBlockManager(String bucketName) {
+    private MappedFileManager getBucketFileManager(String bucketName,String prefix) {
         // 第一次无锁查询
         MappedFileManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -57,7 +57,7 @@ public class WalInstanceBucketManager {
             }
             // 创建新的MappedFileManager
             String managerDirPath=instanceDirPath+ File.separator+instanceName+File.separator+bucketName;
-            manager = new MappedFileManager(instanceName,bucketName,managerDirPath,config.pageFlushLevel);
+            manager = new MappedFileManager(prefix,managerDirPath,instanceName,bucketName,config.getWalConfig().pageFlushLevel,config.getWalConfig().walFileSize,config.getCacheConfig().blockSize);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {
