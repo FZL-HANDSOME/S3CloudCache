@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.core.global;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import software.amazon.awssdk.services.s3.S3Client;
 
@@ -35,7 +36,7 @@ public class CoreInstanceBucketManager {
     /**
      * 根据bucket获取对应的BlockManager
      */
-    private CacheBlockManager getBlockManager(String bucketName,String prefix) {
+    public CacheBlockManager getBlockManager(String bucketName) {
         // 第一次无锁查询
         CacheBlockManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -51,7 +52,9 @@ public class CoreInstanceBucketManager {
                 return manager;
             }
             // 创建新的BlockManager
-            manager = new CacheBlockManager(config.getCacheConfig().cacheSize, config.getCacheConfig().blockSize, config.getCacheConfig().blockUpLoadCount, instanceName, bucketName,prefix, s3Client);
+            BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
+            BucketConfig realConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
+            manager = new CacheBlockManager(instanceName, bucketName,s3Client,realConfig);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {

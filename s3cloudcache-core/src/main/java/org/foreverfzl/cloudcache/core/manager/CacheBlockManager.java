@@ -5,6 +5,7 @@ import org.foreverfzl.cloudcache.core.cache.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -23,14 +24,11 @@ public class CacheBlockManager implements AutoCloseable {
 
     private final Arena arena;
     private final MemorySegment globalMemorySegment;
-    private final long cacheSize;
-    private final int blockSize;
     private final int blockCount;
     public final String instanceName;
     public final String bucketName;
-    public final String prefix;
-
-
+    //Bucket级别配置文件
+    private final BucketConfig config;
     // 空闲/干净的 CloudCacheBlock 池
     private final BlockingQueue<CloudCacheBlock> freeBlocks;
 
@@ -41,33 +39,25 @@ public class CacheBlockManager implements AutoCloseable {
     private final CacheBlockUpdater blockUpdater;
 
 
-    public CacheBlockManager(long cacheSize, int blockSize, int blockUpLoadMaxCount, String instanceName, String bucketName, String prefix, S3Client s3Client) {
-        if (cacheSize <= 0 || blockSize <= 0) {
-            throw new IllegalArgumentException("cacheSize and blockSize must be greater than 0");
-        }
-        if (cacheSize < blockSize) {
-            throw new IllegalArgumentException("cacheSize must be greater than or equal to blockSize");
-        }
-        this.prefix = prefix;
-        this.cacheSize = cacheSize;
-        this.blockSize = blockSize;
-        this.blockCount = (int) (cacheSize / blockSize);
+    public CacheBlockManager(String instanceName, String bucketName, S3Client s3Client, BucketConfig config) {
+        this.config = config;
+        this.blockCount = (int) (config.cacheSize / config.blockSize);
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         // 1. 创建 MemorySegment 堆外缓冲区
         this.arena = Arena.ofShared();
-        this.globalMemorySegment = arena.allocate(cacheSize);
+        this.globalMemorySegment = arena.allocate(config.cacheSize);
         this.freeBlocks = new ArrayBlockingQueue<>(blockCount);
         this.keyBlockMap = new ConcurrentHashMap<>();
-        blockUpdater = new CacheBlockUpdater(this, blockUpLoadMaxCount, s3Client);
+        blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client);
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
-            long offset = (long) i * blockSize;
-            CloudCacheBlock block = new CloudCacheBlock(offset, blockSize, globalMemorySegment.asSlice(offset, blockSize), this);
+            long offset = (long) i * config.blockSize;
+            CloudCacheBlock block = new CloudCacheBlock(offset, config.blockSize, globalMemorySegment.asSlice(offset, config.blockSize), this);
             freeBlocks.add(block);
         }
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
-                cacheSize, blockSize, blockCount, blockUpLoadMaxCount);
+                config.cacheSize, config.blockSize, blockCount, config.blockUpLoadCount);
     }
 
     /**
@@ -135,7 +125,7 @@ public class CacheBlockManager implements AutoCloseable {
             }
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
-            block.setS3Key(ProjectUtil.generateUniqueS3Key(this.prefix, this.instanceName, this.bucketName, fileName, blockIndex));
+            block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileName, blockIndex));
             keyBlockMap.put(cacheBlockKey, block);
             return block;
         }
@@ -169,14 +159,6 @@ public class CacheBlockManager implements AutoCloseable {
                 log.error("Failed to close CacheBlockManager arena", e);
             }
         }
-    }
-
-    public long getCacheSize() {
-        return cacheSize;
-    }
-
-    public int getBlockSize() {
-        return blockSize;
     }
 
     public int getBlockCount() {

@@ -1,14 +1,21 @@
 package org.foreverfzl.cloudcache.wal.global;
 
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
-import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
+import org.foreverfzl.cloudchache.common.LogName;
+import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class WalInstanceBucketManager {
+
+    protected static final Logger log = LoggerFactory.getLogger(LogName.WAL_INSTANCE_BUCKET_MANAGER);
+
     private static final int LOCKS_COUNT = 128;
     private final ConcurrentHashMap<String, MappedFileManager> managerHashMap;
     private final String instanceName;
@@ -18,13 +25,10 @@ public class WalInstanceBucketManager {
 
     private final ReentrantLock[] locks;
 
-    public WalInstanceBucketManager(String instanceName,String instanceDirPath, S3CloudCacheConfig config) {
+    public WalInstanceBucketManager(String instanceName, String instanceDirPath, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.config = config;
-        this.instanceDirPath=config.getWalConfig().walPath!=null?
-                config.getWalConfig().walPath+ProjectUtil.WAL_FILE_ADDRESS:
-                ProjectUtil.USER_HOME+ProjectUtil.WAL_FILE_ADDRESS;
-
+        this.instanceDirPath = instanceDirPath;
         managerHashMap = new ConcurrentHashMap<>();
         locks = new ReentrantLock[LOCKS_COUNT];
         for (int i = 0; i < LOCKS_COUNT; i++) {
@@ -32,20 +36,21 @@ public class WalInstanceBucketManager {
         }
     }
 
+    //todo 找到对应的Bucket管理者，然后添加数据
+    public AppendMessageResult appendData(String bucketName, String prefix, byte[] data) {
+        return null;
+    }
 
-    public void appendData(){
 
+    public MappedFileManager getBucketFilManager(String bucketName) {
+        return managerHashMap.get(bucketName);
     }
 
     /**
      * 根据bucket获取对应的MappedFileManager
      */
-    private MappedFileManager getBucketFileManager(String bucketName,String prefix) {
-        // 第一次无锁查询
-        MappedFileManager manager = managerHashMap.get(bucketName);
-        if (manager != null) {
-            return manager;
-        }
+    public MappedFileManager createBucketFileManager(String bucketName) {
+        MappedFileManager manager = null;
         // 获取该bucket对应的分段锁
         ReentrantLock lock = getLock(bucketName);
         lock.lock();
@@ -56,8 +61,10 @@ public class WalInstanceBucketManager {
                 return manager;
             }
             // 创建新的MappedFileManager
-            String managerDirPath=instanceDirPath+ File.separator+instanceName+File.separator+bucketName;
-            manager = new MappedFileManager(prefix,managerDirPath,instanceName,bucketName,config.getWalConfig().pageFlushLevel,config.getWalConfig().walFileSize,config.getCacheConfig().blockSize);
+            String managerDirPath = instanceDirPath + File.separator + instanceName + File.separator + bucketName;
+            BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
+            BucketConfig realBucketConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
+            manager = new MappedFileManager(managerDirPath, instanceName, bucketName, realBucketConfig);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {

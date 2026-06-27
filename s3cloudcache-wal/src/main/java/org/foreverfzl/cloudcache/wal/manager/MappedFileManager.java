@@ -3,6 +3,7 @@ package org.foreverfzl.cloudcache.wal.manager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudcache.wal.storefile.WalDataStruct;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
@@ -10,7 +11,11 @@ import org.slf4j.LoggerFactory;
 
 
 import java.io.File;
+import java.io.RandomAccessFile;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
 
@@ -21,10 +26,6 @@ public class MappedFileManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
     public final String instanceName;
     public final String bucketName;
-    private final String prefix; //用户自定义的前缀，用于生成S3key
-    //前缀文件引用
-    private final DefaultMappedFile prefixMappedFile;
-
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
     //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
@@ -35,23 +36,23 @@ public class MappedFileManager implements AutoCloseable {
     private final Thread chackMappedFileThread;
     //主要控制线程flushReadPosition、chackMappedFile等的执行
     private volatile boolean active = true;
-    //操作系统脏页刷新时间，也就是globalReadPosition的刷新时间
-    private final long pageFlushTime;
     //该bucket的wal目录绝对地址
     private final String dirPath;
-    private final long fileSize;
-    private final int blockSize;
+    //Bucket级别配置文件
+    private final BucketConfig config;
+    //前缀文件的引用
+    private final File prefixFile;
+    // 前缀文件 文件名
+    private static final String PREFIX_FILE_NAME = "prefix";
+    // 前缀文件大小
+    private static final long PREFIX_FILE_SIZE = 1024;
 
-    public MappedFileManager(String prefix,String dirPath,String instanceName, String bucketName, long pageFlushTime,
-                             long fileSize,int blockSize) {
-        this.prefix = prefix;
+    public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         this.dirPath = dirPath;
-        this.pageFlushTime = pageFlushTime;
-        this.fileSize=fileSize;
-        this.blockSize=blockSize;
-        this.prefixMappedFile=walPrefix(prefix);
+        this.config=config;
+        prefixFile = saveBucketPrefix(config.s3KeyPrefix); //保存前缀
         flushReadPositionThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -71,7 +72,9 @@ public class MappedFileManager implements AutoCloseable {
         chackMappedFileThread.start();
     }
 
-    public void flushReadPositionTask() {
+
+
+    private void flushReadPositionTask() {
         try {
             while (active) {
                 // 利用 floorEntry 解决绝对位点路由问题，时间复杂度为logn，但是数据量少可以忽略
@@ -79,7 +82,7 @@ public class MappedFileManager implements AutoCloseable {
                 if (entry == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
                     log.warn("flushReadPositionTask failed: can not find `{}` DefaultMappedFile Object", globalReadPosition);
-                    Thread.sleep(pageFlushTime);
+                    Thread.sleep(config.pageFlushLevel);
                     continue;
                 }
                 DefaultMappedFile mappedFile = entry.getValue();
@@ -101,22 +104,64 @@ public class MappedFileManager implements AutoCloseable {
                         globalReadPosition = mappedFile.getFileFromOffset() + mappedFile.getFileSize();
                     }
                 }
-
-                Thread.sleep(pageFlushTime);
+                Thread.sleep(config.pageFlushLevel);
             }
         } catch (Exception e) {
             log.error(e.getMessage());
         }
     }
 
-    //将prefix持久化，只有创建新的MappedFileManager的时候(也就是新的Bucket)才会持久化prefix
-    private DefaultMappedFile walPrefix(String prefix) {
-        DefaultMappedFile file=new DefaultMappedFile(dirPath, ProjectUtil.PREFIX_FILE_NAME,0, 1024 * 1024,blockSize,false,false,this);
-        file.appendData(new WalDataStruct(prefix));
-        return file;
+
+    /**
+     * 创建一个 1MB 的文件并持久化用户自定义前缀
+     * * @param prefix 用户自定义的 S3Key 前缀
+     * 地址举例（C:\Users\root\ClouCache\store\instance1\textBucket\prefix）
+     *
+     * @return 成功创建并完成刷盘的文件引用 (File)
+     */
+    private File saveBucketPrefix(String prefix) {
+        // 1. 校验并确保全局静态变量指定的目录结构存在
+        File directory = new File(dirPath);
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new RuntimeException("无法创建目标元数据目录: " + dirPath);
+        }
+        // 定位具体的元数据配置文件引用
+        File metaFile = new File(directory, PREFIX_FILE_NAME);
+        // 2. 将字符串转换为统一的 UTF-8 字节数组
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        int prefixLen = prefixBytes.length;
+        // 3. 安全边界校验：4字节长度字段 + 实际数据长度 不能超过 1MB 限制
+        if (4 + prefixLen > PREFIX_FILE_SIZE) {
+            throw new IllegalArgumentException("Prefix too long,Exceeds 1024 bytes");
+        }
+        // 4. 使用 rw 模式打开文件通道，确保具备读写权限
+        try (RandomAccessFile raf = new RandomAccessFile(metaFile, "rw");
+             FileChannel channel = raf.getChannel()) {
+            raf.setLength(PREFIX_FILE_SIZE);
+            // 5. 根据你的 PrefixDataStruct 协议布局构建堆内缓冲区
+            // 内存布局：[ 4字节的 prefixLen ] + [ 变长的 prefix 字节数据 ]
+            ByteBuffer buffer = ByteBuffer.allocate(4 + prefixLen);
+            buffer.putInt(prefixLen);
+            buffer.put(prefixBytes);
+            // 切换为读模式，准备向通道外传输数据
+            buffer.flip();
+            // 6. 强制将物理指针归零，从文件头部开始覆盖写入
+            channel.position(0);
+            while (buffer.hasRemaining()) {
+                channel.write(buffer);
+            }
+            // 强制将 OS PageCache 中的元数据与数据强行同步刷入物理磁盘介质
+            // 参数为 true 代表连同文件系统的 inode 时间戳等元数据一并刷盘，防御断电灾难
+            channel.force(true);
+        } catch (Exception e) {
+            throw new RuntimeException("底层元数据文件 [bucket.meta] 持久化失败", e);
+        }
+        // 8. 返回该文件的引用
+        return metaFile;
     }
 
-    public void chackMappedFileTask() {
+    //检查WAL文件的生命周期
+    private void chackMappedFileTask() {
 
     }
 
