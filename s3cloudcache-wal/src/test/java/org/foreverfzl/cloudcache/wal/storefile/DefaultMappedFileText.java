@@ -14,9 +14,11 @@ import java.util.concurrent.*;
 public class DefaultMappedFileText {
 
 
-//    static void main() throws Exception {
-//        textPrefix();
-//    }
+    static void main() throws Exception {
+        CompletableFuture<DefaultMappedFile> future = new CompletableFuture<>();
+        ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
+
+    }
 
 
 //    /**

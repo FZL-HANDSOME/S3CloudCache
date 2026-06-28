@@ -11,6 +11,7 @@ import java.io.File;
 import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -310,7 +311,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             if (msgSize > remainingInBlock) {
                 // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
                 long paddingPos = currentPos + remainingInBlock;
-                if (paddingPos > this.fileSize) {
+                if (paddingPos == this.fileSize) {
                     close();
                     return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
                 }
