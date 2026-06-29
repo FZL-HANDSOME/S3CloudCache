@@ -1,8 +1,4 @@
-package org.foreverfzl.cloudcache.wal.storefile;
-
-import java.lang.foreign.MemoryLayout;
-import java.lang.foreign.StructLayout;
-import java.lang.foreign.ValueLayout;
+package org.foreverfzl.cloudcache.wal.datastruct;
 
 /**
  * Padding 墓碑协议元数据描述。
@@ -17,7 +13,6 @@ import java.lang.foreign.ValueLayout;
 public final class PaddingStruct {
 
     //结构为 魔术int + 长度int
-
     // 🚨 独一无二的 Padding 魔数。读取流读到这里，如果 validateMagic 发现是这个值，说明是墓碑
     public static final int PADDING_MAGIC = 0x50414444;
 

@@ -1,5 +1,8 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
+
 import java.nio.channels.FileChannel;
 
 public interface MappedFile {
@@ -24,10 +27,10 @@ public interface MappedFile {
 
     /**
      *
-     * @param walDataStruct 磁盘持久化协议格式
+     * @param dataStruct 磁盘持久化协议格式
      * @return
      */
-    public AppendMessageResult appendData(final WalDataStruct walDataStruct);
+    public AppendMessageResult appendData(final DataStruct dataStruct);
 
 
     String getFileName();

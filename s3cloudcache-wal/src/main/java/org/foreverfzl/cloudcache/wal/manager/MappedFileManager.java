@@ -1,5 +1,6 @@
 package org.foreverfzl.cloudcache.wal.manager;
 
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -15,6 +16,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -25,8 +27,10 @@ public class MappedFileManager implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
     public final String instanceName;
     public final String bucketName;
+
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
+
     //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
     private volatile long globalReadPosition;
     //刷新所有文件的读指针
@@ -54,12 +58,15 @@ public class MappedFileManager implements AutoCloseable {
     // 前缀文件大小
     private static final long PREFIX_FILE_SIZE = 1024;
 
-    ReentrantLock appendFailLock=new ReentrantLock();
+    //这把锁就是为了
+    ReentrantLock fileEndLock =new ReentrantLock();
 
-    //到达水位线 创建新文件的时候都会使用这个 虚拟线程工厂
-    private static final ExecutorService virtualThreadFactory= Executors.newVirtualThreadPerTaskExecutor();
-    //当活跃的文件内容超过50%的时候会预生成一个新的 DefaultMappedFile，preAllocatedFuture就是用来保存预生成文件的结果
-    private final AtomicReference<CompletableFuture<DefaultMappedFile>> preAllocatedFuture = new AtomicReference<>(null);
+    //到达水位线 创建新文件的时候都会使用这个线程池
+    private static final ExecutorService createNewFileExecutor= Executors.newSingleThreadExecutor();
+
+    //该属性就是看看超过水位线后是否已经开启创建新文件了
+    private volatile AtomicBoolean isCreateNewFile=new AtomicBoolean(false);
+
 
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
         this.instanceName = instanceName;
@@ -88,18 +95,27 @@ public class MappedFileManager implements AutoCloseable {
         chackMappedFileThread.start();
     }
 
-    //todo 添加数据的方法
-    public AppendMessageResult appendData(){
-        return null;
+    //todo 将数据添加到指定文件，如果文件满了则获取新的文件进行写，如果是其它错误则分情况而论
+    public AppendMessageResult appendData(final DataStruct dataStruct){
+        //先保存当前数据的文件
+        DefaultMappedFile oldMappedFile=this.activeMappedFile;
+        //先去目前活跃的文件中添加数据
+        AppendMessageResult result = activeMappedFile.appendData(dataStruct);
+        AppendMessageResult.AppendStatus status = result.getStatus();
+        //文件到达结尾了或者该文件关闭了，使用新的文件重试,其它情况直接返回,交给Instance处理
+        if(status == AppendMessageResult.AppendStatus.END_OF_FILE||status== AppendMessageResult.AppendStatus.FILE_CLOSED){
+
+        }
+        return result;
     }
 
     /**
-     * 获取或者创建文件，并更新activeMappedFile属性
+     * 获取或者创建文件，并更新activeMappedFile属性，只有文件满了添加失败的线程会触发
      */
-    private void getOrCreateNewActiveMappedFile(DefaultMappedFile oldMappedFile) {
-
+    private void updateOrCreateNewActiveMappedFile(DefaultMappedFile oldMappedFile) {
         try {
-            appendFailLock.lock();
+            //允许一个线程去判断
+            fileEndLock.lock();
             if(oldMappedFile!=activeMappedFile){
                 return;
             }
@@ -111,23 +127,11 @@ public class MappedFileManager implements AutoCloseable {
                 this.activeMappedFile=newMappedFile;
                 return;
             }
-            //新文件没有准备好，先去看看是否有创建新文件的任务，如果有则等待获取结果
-            CompletableFuture<DefaultMappedFile> future = preAllocatedFuture.get();
-            if(future!=null){
-                try {
-                    // 限时等待后台线程池分配完
-                    newMappedFile = future.get(3, TimeUnit.SECONDS);
-                } catch (Exception e) {
-                    // 万一线程池满了或者创建失败，当前写线程亲自同步创建兜底（自愈）
-                    newMappedFile = synCreateMappedFile(newFileFromOffset);
-                }
-            }else {
-                //新文件没有创建，该线程自己创建
-                newMappedFile = synCreateMappedFile(newFileFromOffset);
-            }
-            this.activeMappedFile = newMappedFile;
+            //发现新文件还没好，自己去创建新的文件
+            synCreateMappedFile(newFileFromOffset);
+            this.activeMappedFile=mappedFiles.get(newFileFromOffset);
         }finally {
-            appendFailLock.unlock();
+            fileEndLock.unlock();
         }
 
     }
@@ -136,45 +140,47 @@ public class MappedFileManager implements AutoCloseable {
      * 当到达水位线70%创建一个:创建新文件的CompletableFuture任务
      */
     private void tryCreateNextFileWhenReachFileWaterMark(long nextFileFromOffset){
-        if(preAllocatedFuture.get()!=null){
+        if(isCreateNewFile.get()){
             return;
         }
-
-        CompletableFuture<DefaultMappedFile> future = new CompletableFuture<>();
-        if(preAllocatedFuture.compareAndSet(null,future)){
-            virtualThreadFactory.execute(()->{
-                try{
-                    DefaultMappedFile file = synCreateMappedFile(nextFileFromOffset);
-                    future.complete(file);
-                }catch(Throwable e){
-                    future.completeExceptionally(e);
-                    //失败恢复为null
-                    preAllocatedFuture.compareAndSet(future,null);
-                }
+        //多个线程开始抢创建文件权限
+        if(isCreateNewFile.compareAndSet(false,true)){
+            createNewFileExecutor.execute(()->{
+                synCreateMappedFile(nextFileFromOffset);
             });
         }
     }
 
     /**
-     *  同步创建新的文件并放入到容器中
+     * 同步创建新的文件并放入到容器中
      */
-    private DefaultMappedFile synCreateMappedFile(long fileFromOffset){
-        DefaultMappedFile newFile=null;
-        try {
-            newFile=new DefaultMappedFile(WAL_FILE_PATH,String.valueOf(fileFromOffset),fileFromOffset,config.walFileSize,
-                    config.blockSize,config.isWarmWalFile,config.isLockMappedFilePageCache,this);
-            mappedFiles.put(fileFromOffset,newFile);
-        }catch (Exception e){
-            log.warn("Exception is {} , instanceName={},bucketName={},failed to create MappedFile",
-                    e,instanceName,bucketName);
+    private void synCreateMappedFile(long fileFromOffset) {
+        String fileName = String.valueOf(fileFromOffset);
+        //这里水位线线程 和 其它线程可能出现冲突，同时创建文件，需要加锁
+        synchronized (fileName.intern()) {
+            try {
+                DefaultMappedFile newFile = null;
+                newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, config.walFileSize,
+                        config.blockSize, config.isWarmWalFile, config.isLockMappedFilePageCache, this);
+                //文件为null有可能其它线程已经创建了文件了
+                if (newFile == null) {
+                    return;
+                }
+                mappedFiles.put(fileFromOffset, newFile);
+            }catch (Exception e){
+                log.warn("Exception is{} . synCreateMappedFile failed, instance={},bucket={},fileName={}",
+                        e,instanceName,bucketName,fileName);
+                throw e;
+            }
+
         }
-        return newFile;
     }
 
     private void flushReadPositionTask() {
         try {
             while (active) {
-                // 利用 floorEntry 解决绝对位点路由问题，时间复杂度为logn，但是数据量少可以忽略
+                //利用 floorEntry 解决绝对位点路由问题，
+                //todo 这里可以用activeMappedFile优化，不优化也可以，时间复杂度为logn，但是数据量少可以忽略
                 Map.Entry<Long, DefaultMappedFile> entry = mappedFiles.floorEntry(globalReadPosition);
                 if (entry == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
@@ -256,6 +262,8 @@ public class MappedFileManager implements AutoCloseable {
         // 8. 返回该文件的引用
         return metaFile;
     }
+
+
 
     //检查WAL文件的生命周期
     private void chackMappedFileTask() {

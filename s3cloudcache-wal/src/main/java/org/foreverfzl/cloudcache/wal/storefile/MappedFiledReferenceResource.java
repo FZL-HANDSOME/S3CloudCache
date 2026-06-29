@@ -20,7 +20,7 @@ public abstract class MappedFiledReferenceResource {
 
     //关闭文件写入
     public void close() {
-        this.available = false;
+        if(available) this.available = false;
     }
 
     public void delete() {

@@ -1,7 +1,7 @@
 package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
-import org.foreverfzl.cloudcache.core.cache.BlockDataStruct;
+import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
@@ -69,24 +69,16 @@ public class CacheBlockManager implements AutoCloseable {
     public AppendDataResult appendData(BlockDataStruct dataStruct) {
         CloudCacheBlock cacheBlock = null;
         long curWritePosition = 0;
-        byte[] data = null;
         int size = 0;
         try {
-            data = dataStruct.getData();
-            size = data.length;
+            size = dataStruct.getDataLen();
             cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
-            MemorySegment cacheBlockSegment = cacheBlock.getMemorySegment();
-            MemorySegment.copy(
-                    data,
-                    0,
-                    cacheBlockSegment,
-                    ValueLayout.JAVA_BYTE,
-                    curWritePosition,
-                    size
-            );
+            MemorySegment cacheBlockSegment = cacheBlock.getMemorySegment(curWritePosition,size);
+            //将数据写入Block
+            dataStruct.writeTo(cacheBlockSegment);
         } catch (Exception e) {
             return AppendDataResult.fail();
         } finally {
@@ -98,8 +90,6 @@ public class CacheBlockManager implements AutoCloseable {
 
     /**
      * 上传Block
-     *
-     * @param cacheBlock
      */
     public void updateBlock(CloudCacheBlock cacheBlock) {
         blockUpdater.upLoadBlock(cacheBlock);

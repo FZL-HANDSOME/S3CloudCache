@@ -6,40 +6,6 @@ package org.foreverfzl.cloudcache.wal.storefile;
  */
 public class AppendMessageResult {
 
-    public int getBlockExpectedValidBytes() {
-        return blockExpectedValidBytes;
-    }
-
-    public void setBlockExpectedValidBytes(int blockExpectedValidBytes) {
-        this.blockExpectedValidBytes = blockExpectedValidBytes;
-    }
-
-    /**
-     * 追加写入的状态枚举
-     */
-    public enum AppendStatus {
-        /**
-         * 写入成功
-         */
-        PUT_OK,
-        /**
-         * 文件剩余空间不足，已写满
-         */
-        END_OF_FILE,
-        /**
-         * 参数异常（如 walDataStruct 为空）
-         */
-        INVALID_ARGUMENT,
-        /**
-         * 写入过程中发生未知错误
-         */
-        UNKNOWN_ERROR,
-        /**
-         * 文件关闭
-         */
-        FILE_CLOSED
-    }
-
     /**
      * 写入状态
      */
@@ -70,6 +36,7 @@ public class AppendMessageResult {
      * 该数据在改文件的哪逻辑Block中
      */
     private int logicalIndex;
+
     /**
      * 该Block的期望字节数，Block上传的时候会根据这个字段判断是否可以上传
      */
@@ -113,6 +80,49 @@ public class AppendMessageResult {
      */
     public static AppendMessageResult fail(AppendStatus status, String fileName) {
         return new AppendMessageResult(status, -1, 0, System.currentTimeMillis(), fileName);
+    }
+
+    public int getBlockExpectedValidBytes() {
+        return blockExpectedValidBytes;
+    }
+
+    public void setBlockExpectedValidBytes(int blockExpectedValidBytes) {
+        this.blockExpectedValidBytes = blockExpectedValidBytes;
+    }
+
+    /**
+     * 追加写入的状态枚举
+     */
+    public enum AppendStatus {
+        /**
+         * 写入成功，继续后续业务或返回 ACK。
+         */
+        PUT_OK,
+        /**
+         * 文件剩余空间不足，已写满
+         */
+        END_OF_FILE,
+        /**
+         * 参数异常（如 walDataStruct 为空）
+         */
+        INVALID_ARGUMENT,
+        /**
+         * 写入过程中发生未知错误
+         */
+        UNKNOWN_ERROR,
+        /**
+         * 文件关闭
+         */
+        FILE_CLOSED,
+        /**
+         * 数据太大,超过了单个文件的大小
+         */
+        MESSAGE_SIZE_EXCEEDED,
+        /**
+         * 物理磁盘满
+         */
+        DISK_FULL;
+
     }
 
     /**

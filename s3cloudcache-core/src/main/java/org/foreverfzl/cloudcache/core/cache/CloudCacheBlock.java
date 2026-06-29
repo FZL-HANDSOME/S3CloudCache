@@ -19,6 +19,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
 
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
     private volatile long writePosition; //写指针
+
     //globalMemorySegment的一个切片
     protected MemorySegment memorySegment;
     private final CacheBlockManager manager;
@@ -61,6 +62,11 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
             }
         } while (!WROTE_POSITION_UPDATER.compareAndSet(this, currentPosition, nextPosition));
         return currentPosition;
+    }
+
+    //获取指定区切片
+    public MemorySegment getMemorySegment(long fromOffset,long dataLen) {
+        return memorySegment.asSlice(fromOffset,dataLen);
     }
 
 
@@ -122,9 +128,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.logicalIndex = logicalIndex;
     }
 
-    public MemorySegment getMemorySegment() {
-        return memorySegment;
-    }
 
     public void clean() {
         this.s3Key = null;

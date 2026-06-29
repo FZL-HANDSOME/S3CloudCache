@@ -1,14 +1,16 @@
-package org.foreverfzl.cloudcache.storage.instance;
+package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.storage.instance.WriteResult;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 
 /**
- * 直接获取对应Bucket的操作句柄，适合高性能写
+ * 直接获取对应Bucket的操作句柄，适合高性能写数据
  */
-public class BucketWriterInstance implements Instance {
+public class BucketWriterInstance extends AbstractBucketInstance {
 
     private final MappedFileManager mappedFileManager;
 
@@ -21,17 +23,22 @@ public class BucketWriterInstance implements Instance {
 
 
     @Override
-    public WriteResult write(String bucketName, byte[] data, int offset, int length) {
+    public WriteResult write(byte[] data) {
         return null;
     }
 
     @Override
-    public WriteResult write(String bucketName, byte[] data) {
+    public WriteResult write(byte[] data, long offset, long length) {
         return null;
     }
 
     @Override
-    public WriteResult write(String bucketName, ByteBuffer buffer) {
+    public WriteResult write(ByteBuffer buffer) {
+        return null;
+    }
+
+    @Override
+    public WriteResult write(ByteBuffer buffer, long offset, long length) {
         return null;
     }
 }

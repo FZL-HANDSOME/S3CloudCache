@@ -1,5 +1,8 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
@@ -11,7 +14,6 @@ import java.io.File;
 import java.io.RandomAccessFile;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
@@ -39,7 +41,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
     private final MappedFileManager manager;
 
-    protected File file;
+    protected File file; //文件的引用
     protected String dirPath;
     protected String fileName;
     protected long fileSize;
@@ -66,12 +68,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
-                             final long fileSize, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
+                             final long fileSize,File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
         this.dirPath = dirPath;
         this.blockSize = blockSize;
+        this.file=file;
         this.manager = manager;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
@@ -79,13 +82,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
         init(isWarm, isLockMemory);
     }
 
-
     /**
-     * 创建并初始化WAL文件，并且将channel、指针等初始化
-     *
+     * 创建文件方法
      */
-    @Override
-    public void init(boolean isWarm, boolean isLockMemory) {
+    public static DefaultMappedFile createFile(final String dirPath, final String fileName, final long fileFromOffset,
+                                               final long fileSize, final int blockSize, boolean isWarm,
+                                               boolean isLockMemory, MappedFileManager manager) {
         if (fileName == null || fileName.isBlank()) {
             throw new WalException("fileName cannot be null");
         }
@@ -95,14 +97,28 @@ public class DefaultMappedFile extends AbstractMappedFile {
         if (fileSize <= 0) {
             throw new WalException("fileSize must be greater than 0");
         }
+        // 创建目录
+        File dir = new File(dirPath);
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new WalException("Failed to create directory: " + dir);
+        }
+        // 创建文件对象
+        File newfile = new File(dir, fileName);
+        if (newfile.exists()) {
+            //如果文件存在的话就不创建了
+            return null;
+        }
+        //文件不存在则创建
+        return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, newfile, blockSize, isWarm, isLockMemory, manager);
+    }
+
+
+    /**
+     * 文件的内存分配以及预热、锁定等
+     */
+    @Override
+    public void init(boolean isWarm, boolean isLockMemory) {
         try {
-            // 创建目录
-            File dir = new File(dirPath);
-            if (!dir.exists() && !dir.mkdirs()) {
-                throw new WalException("Failed to create directory: " + dir);
-            }
-            // 创建文件对象
-            this.file = new File(dir, fileName);
             // 创建文件并设置大小
             RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
             randomAccessFile.setLength(fileSize);
@@ -259,9 +275,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     0,
                     valueLen
             );
-
             // 7. 构造 WalDataStruct 并返回（构造方法内含 CRC32 校验逻辑）
-            return new WalDataStruct(magic, version, checksum, valueLen, valueBytes);
+            //    public WalDataStruct(int magic, int version, int checksum, int fromOffset, int dataLen, byte[] dataBytes) {
+            return new WalDataStruct(magic, version, checksum, 0,valueLen, valueBytes);
         } catch (Exception e) {
             log.error("getData: failed to read data from file={}, readOffset={}, size={}",
                     fileName, readOffset, size, e);
@@ -279,22 +295,18 @@ public class DefaultMappedFile extends AbstractMappedFile {
      * 3. 抢占成功后调用 doAppend 执行真正的写入操作
      * </p>
      *
-     * @param walDataStruct 磁盘持久化协议格式
+     * @param dataStruct 磁盘持久化协议格式
      * @return true 表示写入成功，false 表示写入失败
      */
     @Override
-    public AppendMessageResult appendData(final WalDataStruct walDataStruct) {
+    public AppendMessageResult appendData(final DataStruct dataStruct) {
         if (!isAvailable()) return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileName);
         // 1. 参数校验
-        if (walDataStruct == null) {
+        if (dataStruct == null) {
             log.warn("appendData: walDataStruct cannot be null, fileName={}", fileName);
             return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
         }
-        if (!walDataStruct.validateMagic()) {
-            log.warn("appendData: invalid magic number in walDataStruct, fileName={}", fileName);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
-        }
-        long msgSize = walDataStruct.getSerializedSize();
+        long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;
@@ -334,7 +346,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
         int logicalIndex = Math.toIntExact(newPos / blockSize);
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
-        AppendMessageResult result = doAppend(currentPos, msgSize, walDataStruct);
+        AppendMessageResult result = doAppend(currentPos, msgSize, dataStruct);
         result.setLogicalIndex(logicalIndex);
         return result;
     }
@@ -357,56 +369,15 @@ public class DefaultMappedFile extends AbstractMappedFile {
      *
      * @param writeOffset   写入的起始偏移量（由 CAS 抢到的 wrotePosition）
      * @param size          要写入的字节数（应等于 walDataStruct.getSerializedSize()）
-     * @param walDataStruct 磁盘持久化协议格式数据
+     * @param dataStruct 磁盘持久化协议格式数据
      * @return AppendMessageResult 写入结果
      */
-    private AppendMessageResult doAppend(final long writeOffset, final long size, final WalDataStruct walDataStruct) {
+    private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
-            long pos = 0;
-            //  Magic
-            targetSlice.set(
-                    JAVA_INT,
-                    pos,
-                    walDataStruct.getMagic()
-            );
-            pos += 4;
-
-            //version
-            targetSlice.set(
-                    JAVA_INT,
-                    pos,
-                    walDataStruct.getVersion()
-            );
-            pos += 4;
-
-            // CRC32
-            targetSlice.set(
-                    JAVA_INT,
-                    pos,
-                    walDataStruct.getChecksum()
-            );
-            pos += 4;
-
-            // Value Length
-            targetSlice.set(
-                    JAVA_INT,
-                    pos,
-                    walDataStruct.getValueLen()
-            );
-            pos += 4;
-
-            // Value Bytes
-            byte[] valueBytes = walDataStruct.getValueBytes();
-            MemorySegment.copy(
-                    valueBytes,
-                    0,
-                    targetSlice,
-                    ValueLayout.JAVA_BYTE,
-                    pos,
-                    valueBytes.length
-            );
+            //将数据写入到targetSlice中
+            dataStruct.writeTo(targetSlice);
             return new AppendMessageResult(
                     AppendMessageResult.AppendStatus.PUT_OK,
                     writeOffset,

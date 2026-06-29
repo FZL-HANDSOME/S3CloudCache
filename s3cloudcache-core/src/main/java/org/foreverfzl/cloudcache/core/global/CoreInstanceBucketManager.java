@@ -33,10 +33,11 @@ public class CoreInstanceBucketManager {
         }
     }
 
+
     /**
-     * 根据bucket获取对应的BlockManager
+     * 根据bucket获取对应的BlockManager，没有则创建
      */
-    public CacheBlockManager getBlockManager(String bucketName) {
+    public CacheBlockManager getOrCreateBlockManager(String bucketName) {
         // 第一次无锁查询
         CacheBlockManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -54,7 +55,7 @@ public class CoreInstanceBucketManager {
             // 创建新的BlockManager
             BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
             BucketConfig realConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
-            manager = new CacheBlockManager(instanceName, bucketName,s3Client,realConfig);
+            manager = new CacheBlockManager(instanceName, bucketName, s3Client, realConfig);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {

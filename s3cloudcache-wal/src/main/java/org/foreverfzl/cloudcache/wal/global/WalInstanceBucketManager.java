@@ -12,6 +12,9 @@ import java.io.File;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
+/**
+ * 管理所有的BucketManager
+ */
 public class WalInstanceBucketManager {
 
     protected static final Logger log = LoggerFactory.getLogger(LogName.WAL_INSTANCE_BUCKET_MANAGER);
@@ -36,21 +39,16 @@ public class WalInstanceBucketManager {
         }
     }
 
-    //todo 找到对应的Bucket管理者，然后添加数据
-    public AppendMessageResult appendData(String bucketName, String prefix, byte[] data) {
-        return null;
-    }
 
-
-    public MappedFileManager getBucketFilManager(String bucketName) {
-        return managerHashMap.get(bucketName);
-    }
 
     /**
-     * 根据bucket获取对应的MappedFileManager
+     * 根据bucket获取对应的MappedFileManager，没有则创建
      */
-    public MappedFileManager createBucketFileManager(String bucketName) {
-        MappedFileManager manager = null;
+    public MappedFileManager getOrCreateBucketFileManager(String bucketName) {
+        MappedFileManager manager = managerHashMap.get(bucketName);
+        if(manager!=null){
+            return manager;
+        }
         // 获取该bucket对应的分段锁
         ReentrantLock lock = getLock(bucketName);
         lock.lock();
