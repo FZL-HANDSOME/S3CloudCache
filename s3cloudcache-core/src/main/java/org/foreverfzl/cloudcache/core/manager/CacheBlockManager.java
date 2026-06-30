@@ -95,7 +95,6 @@ public class CacheBlockManager implements AutoCloseable {
         blockUpdater.upLoadBlock(cacheBlock);
     }
 
-
     /**
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。

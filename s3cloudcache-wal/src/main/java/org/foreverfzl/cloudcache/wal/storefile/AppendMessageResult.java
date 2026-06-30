@@ -122,7 +122,6 @@ public class AppendMessageResult {
          * 物理磁盘满
          */
         DISK_FULL;
-
     }
 
     /**
@@ -164,10 +163,12 @@ public class AppendMessageResult {
     public String toString() {
         return "AppendMessageResult{" +
                 "status=" + status +
+                ", fileName='" + fileName + '\'' +
                 ", wroteOffset=" + wroteOffset +
                 ", wroteBytes=" + wroteBytes +
                 ", storeTimestamp=" + storeTimestamp +
-                ", fileName='" + fileName + '\'' +
+                ", logicalIndex=" + logicalIndex +
+                ", blockExpectedValidBytes=" + blockExpectedValidBytes +
                 '}';
     }
 }

@@ -18,7 +18,9 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.channels.FileChannel;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import static java.lang.foreign.ValueLayout.JAVA_INT;
@@ -34,6 +36,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public static final AtomicLongFieldUpdater<DefaultMappedFile> WROTE_POSITION_UPDATER;
     public static final AtomicLongFieldUpdater<DefaultMappedFile> READ_POSITION_UPDATER;
     public static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
+    public static final AtomicIntegerFieldUpdater<DefaultMappedFile> IS_CREATE_NEW_FILE;
 
     public volatile long fileFromOffset;
     public volatile long wrotePosition; //数据写入位置
@@ -41,10 +44,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
     private final MappedFileManager manager;
 
+    //该属性就是看看超过水位线后是否已经开启创建新文件了，0代表未创建，1代表创建
+    private volatile int isCreateNewFile = 0;
+
     protected File file; //文件的引用
     protected String dirPath;
     protected String fileName;
-    protected long fileSize;
+    public long fileSize;
     protected FileChannel fileChannel;
     protected Arena arena;
     protected MemorySegment mappedMemorySegment; //本质是MMP内存映射
@@ -62,19 +68,20 @@ public class DefaultMappedFile extends AbstractMappedFile {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "wrotePosition");
         READ_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "readPosition");
         UPLOAD_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "upLoadPosition");
+        IS_CREATE_NEW_FILE = AtomicIntegerFieldUpdater.newUpdater(DefaultMappedFile.class, "isCreateNewFile");
         // 初始化原生 long[] 数组的元素句柄
         ARRAY_ELEMENT_HANDLE = MethodHandles.arrayElementVarHandle(long[].class);
     }
 
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
-                             final long fileSize,File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
+                             final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
         this.dirPath = dirPath;
         this.blockSize = blockSize;
-        this.file=file;
+        this.file = file;
         this.manager = manager;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
@@ -191,7 +198,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         if (pages <= 0) {
             throw new WalException("pages must be greater than 0");
         }
-
         long size = mappedMemorySegment.byteSize();
         // 动态获取操作系统页大小，若获取不到则默认使用 4096 字节
         int pageSize = ProjectUtil.OS_PAGE_SIZE;
@@ -277,7 +283,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             );
             // 7. 构造 WalDataStruct 并返回（构造方法内含 CRC32 校验逻辑）
             //    public WalDataStruct(int magic, int version, int checksum, int fromOffset, int dataLen, byte[] dataBytes) {
-            return new WalDataStruct(magic, version, checksum, 0,valueLen, valueBytes);
+            return new WalDataStruct(magic, version, checksum, 0, valueLen, valueBytes);
         } catch (Exception e) {
             log.error("getData: failed to read data from file={}, readOffset={}, size={}",
                     fileName, readOffset, size, e);
@@ -343,6 +349,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // CAS失败，提示CPU这是spin等待
             Thread.onSpinWait();
         }
+        //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
+        if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
+            manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
+        }
         //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
         int logicalIndex = Math.toIntExact(newPos / blockSize);
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
@@ -367,9 +377,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
      * 因此 [writeOffset, writeOffset + size) 区间由调用线程独占，无并发问题。
      * </p>
      *
-     * @param writeOffset   写入的起始偏移量（由 CAS 抢到的 wrotePosition）
-     * @param size          要写入的字节数（应等于 walDataStruct.getSerializedSize()）
-     * @param dataStruct 磁盘持久化协议格式数据
+     * @param writeOffset 写入的起始偏移量（由 CAS 抢到的 wrotePosition）
+     * @param size        要写入的字节数（应等于 walDataStruct.getSerializedSize()）
+     * @param dataStruct  磁盘持久化协议格式数据
      * @return AppendMessageResult 写入结果
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
@@ -423,13 +433,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return mappedMemorySegment;
     }
 
-    public long getFileSize() {
-        return fileSize;
-    }
-
-    public long getFileFromOffset() {
-        return fileFromOffset;
-    }
 }
 
 

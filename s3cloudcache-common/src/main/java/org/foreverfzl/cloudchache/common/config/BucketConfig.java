@@ -46,4 +46,58 @@ public class BucketConfig {
     public Boolean isLockMappedFilePageCache = false;
 
 
+    public BucketConfig() {
+
+    }
+
+    public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount, Long pageFlushLevel, Boolean isWarmWalFile, Boolean isLockMappedFilePageCache) {
+        this.s3KeyPrefix = s3KeyPrefix;
+        this.walFileSize = walFileSize;
+        this.cacheSize = cacheSize;
+        this.blockSize = blockSize;
+        this.blockUpLoadCount = blockUpLoadCount;
+        this.pageFlushLevel = pageFlushLevel;
+        this.isWarmWalFile = isWarmWalFile;
+        this.isLockMappedFilePageCache = isLockMappedFilePageCache;
+    }
+
+    public BucketConfig setS3KeyPrefix(String s3KeyPrefix) {
+        this.s3KeyPrefix = s3KeyPrefix;
+        return this;
+    }
+
+    public BucketConfig setWalFileSize(Long walFileSize) {
+        this.walFileSize = walFileSize;
+        return this;
+    }
+
+    public BucketConfig setCacheSize(Long cacheSize) {
+        this.cacheSize = cacheSize;
+        return this;
+    }
+
+    public BucketConfig setBlockSize(Integer blockSize) {
+        this.blockSize = blockSize;
+        return this;
+    }
+
+    public BucketConfig setBlockUpLoadCount(Integer blockUpLoadCount) {
+        this.blockUpLoadCount = blockUpLoadCount;
+        return this;
+    }
+
+    public BucketConfig setPageFlushLevel(Long pageFlushLevel) {
+        this.pageFlushLevel = pageFlushLevel;
+        return this;
+    }
+
+    public BucketConfig setWarmWalFile(Boolean warmWalFile) {
+        isWarmWalFile = warmWalFile;
+        return this;
+    }
+
+    public BucketConfig setLockMappedFilePageCache(Boolean lockMappedFilePageCache) {
+        isLockMappedFilePageCache = lockMappedFilePageCache;
+        return this;
+    }
 }

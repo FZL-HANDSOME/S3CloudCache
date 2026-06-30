@@ -24,6 +24,18 @@ public class HeapBlockDataStruct implements BlockDataStruct{
     }
 
     @Override
+    public void writeTo(MemorySegment target) {
+        MemorySegment.copy(
+                dataBytes,
+                fromOffset,
+                target,
+                ValueLayout.JAVA_BYTE,
+                0,
+                dataLen
+        );
+    }
+
+    @Override
     public String getFileName() {
         return fileName;
     }
@@ -37,17 +49,5 @@ public class HeapBlockDataStruct implements BlockDataStruct{
     @Override
     public int getDataLen() {
         return dataLen;
-    }
-
-    @Override
-    public void writeTo(MemorySegment target) {
-        MemorySegment.copy(
-                dataBytes,
-                fromOffset,
-                target,
-                ValueLayout.JAVA_BYTE,
-                0,
-                dataLen
-        );
     }
 }

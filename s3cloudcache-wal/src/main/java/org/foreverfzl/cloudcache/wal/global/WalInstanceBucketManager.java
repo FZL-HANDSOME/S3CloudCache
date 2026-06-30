@@ -1,10 +1,12 @@
 package org.foreverfzl.cloudcache.wal.global;
 
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +39,17 @@ public class WalInstanceBucketManager {
         for (int i = 0; i < LOCKS_COUNT; i++) {
             locks[i] = new ReentrantLock();
         }
+    }
+
+
+    //WalInstanceBucketManager的appendData只是路由作用
+    public AppendMessageResult appendData(String bucketName, DataStruct dataStruct){
+        MappedFileManager bucketFileManager = getOrCreateBucketFileManager(bucketName);
+        if(bucketFileManager==null){
+            throw new WalException("can not find MappedFileManager");
+        }
+        AppendMessageResult result = bucketFileManager.appendData(dataStruct);
+        return result;
     }
 
 

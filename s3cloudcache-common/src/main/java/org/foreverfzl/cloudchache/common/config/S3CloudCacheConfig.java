@@ -33,7 +33,7 @@ import java.util.Map;
 public class S3CloudCacheConfig {
 
 
-    public String instanceName;
+    public String instanceName=null;
     /**
      * 用户指定的持久化目录
      */
@@ -46,6 +46,40 @@ public class S3CloudCacheConfig {
      * 特殊配置文件
      */
     public Map<String, BucketConfig> specialBuckets = new HashMap<>();
+
+
+    public S3CloudCacheConfig(String instanceName, String walPath, BucketConfig defaultBucketConfig) {
+        this.instanceName = instanceName;
+        this.walPath = walPath;
+        this.defaultBucketConfig = defaultBucketConfig;
+    }
+
+    public S3CloudCacheConfig(String instanceName, String walPath, BucketConfig defaultBucketConfig, Map<String, BucketConfig> specialBuckets) {
+        this.instanceName = instanceName;
+        this.walPath = walPath;
+        this.defaultBucketConfig = defaultBucketConfig;
+        this.specialBuckets = specialBuckets;
+    }
+
+    public S3CloudCacheConfig setInstanceName(String instanceName) {
+        this.instanceName = instanceName;
+        return this;
+    }
+
+    public S3CloudCacheConfig setWalPath(String walPath) {
+        this.walPath = walPath;
+        return this;
+    }
+
+    public S3CloudCacheConfig setDefaultBucketConfig(BucketConfig defaultBucketConfig) {
+        this.defaultBucketConfig = defaultBucketConfig;
+        return this;
+    }
+
+    public S3CloudCacheConfig setSpecialBucket(String bucketName,BucketConfig config){
+        specialBuckets.put(bucketName,config);
+        return this;
+    }
 
 
 }
