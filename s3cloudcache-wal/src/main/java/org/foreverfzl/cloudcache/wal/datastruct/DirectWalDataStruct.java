@@ -10,7 +10,6 @@ import java.util.zip.CRC32;
 public class DirectWalDataStruct implements DataStruct {
 
     private final int magic;
-    private final int version;
     private final int checksum;
     private final int fromOffset;
     private final int dataLen;
@@ -22,7 +21,6 @@ public class DirectWalDataStruct implements DataStruct {
         this.dataLen = dataLen;
         this.fromOffset = fromOffset;
         magic = MAGIC_NUMBER;
-        version = 1;
         checksum = calculateCRC32(dataSegment, fromOffset, dataLen);
     }
 
@@ -32,7 +30,6 @@ public class DirectWalDataStruct implements DataStruct {
         this.dataLen = (int) dataSegment.byteSize();
         this.fromOffset = 0;
         this.magic = MAGIC_NUMBER;
-        version = 1;
         checksum = calculateCRC32(dataSegment, fromOffset, dataLen);
     }
 
@@ -99,13 +96,7 @@ public class DirectWalDataStruct implements DataStruct {
                 magic
         );
         pos+=4;
-        // 2. Version
-        target.set(
-                ValueLayout.JAVA_INT,
-                pos,
-                version
-        );
-        pos+=4;
+
         // 3. Checksum
         target.set(
                 ValueLayout.JAVA_INT,

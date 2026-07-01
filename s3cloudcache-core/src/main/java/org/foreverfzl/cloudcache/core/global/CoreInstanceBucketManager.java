@@ -1,8 +1,11 @@
 package org.foreverfzl.cloudcache.core.global;
 
+import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
+import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +36,20 @@ public class CoreInstanceBucketManager {
         }
     }
 
+
+    public AppendDataResult appendData(String bucketName, BlockDataStruct dataStruct) {
+        CacheBlockManager blockManager = getOrCreateBlockManager(bucketName);
+        if (blockManager == null) {
+            throw new WalException("can not find blockManager");
+        }
+        AppendDataResult appendDataResult = blockManager.appendData(dataStruct);
+        if (!appendDataResult.result()) {
+            //失败后重试
+            appendDataResult=blockManager.failToReAppendData(dataStruct,appendDataResult.offset(),appendDataResult.size());
+        }
+        //如果失败了
+        return appendDataResult;
+    }
 
     /**
      * 根据bucket获取对应的BlockManager，没有则创建

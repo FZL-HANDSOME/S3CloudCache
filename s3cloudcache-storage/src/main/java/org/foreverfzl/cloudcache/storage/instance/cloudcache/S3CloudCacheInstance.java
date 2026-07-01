@@ -3,13 +3,9 @@ package org.foreverfzl.cloudcache.storage.instance.cloudcache;
 
 import org.foreverfzl.cloudcache.core.global.CoreInstanceBucketManager;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
-import org.foreverfzl.cloudcache.storage.instance.WriteResult;
-import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterInstance;
-import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
+import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
 import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
-import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
@@ -17,9 +13,6 @@ import org.foreverfzl.cloudchache.common.exception.CloudCacheException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
-
-import java.lang.foreign.MemorySegment;
-import java.nio.ByteBuffer;
 
 
 public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
@@ -60,43 +53,15 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     /**
      * 获取BucketName对应的Bucket操作句柄
      */
-    public BucketWriterInstance getBucketWriterInstance(String bucketName) {
+    public BucketWriterWriter getBucketWriterInstance(String bucketName) {
         if (bucketName == null || bucketName.isBlank()) {
             throw new CloudCacheException("bucketName can not null");
         }
         //去容器中看看有没有对应的manager，有则返回，没有则创建
         MappedFileManager bucketWalManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
-        //todo 为了测试WAL方便，这里先为null
-//        CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName);
-        return new BucketWriterInstance(bucketName,bucketWalManager,null);
+        CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName);
+        return new BucketWriterWriter(bucketName,bucketWalManager,bucketCoreManager);
     }
 
 
-    @Override
-    public WriteResult write(String bucketName, ByteBuffer buffer, long offset, long length) {
-        return null;
-    }
-
-    @Override
-    public WriteResult write(String bucketName, ByteBuffer buffer) {
-        return null;
-    }
-
-    @Override
-    public WriteResult write(String bucketName, byte[] data, long offset, long length) {
-
-        return null;
-    }
-
-    @Override
-    public WriteResult write(String bucketName, byte[] data) {
-        AppendMessageResult result=null;
-        try {
-            DataStruct dataStruct=new WalDataStruct(data);
-            result=walInstanceBucketManager.appendData(bucketName,dataStruct);
-        }catch (Exception e){
-            log.error("Exeception is=>{} , bucketName=>{} failed write",e,bucketName);
-        }
-        return null;
-    }
 }

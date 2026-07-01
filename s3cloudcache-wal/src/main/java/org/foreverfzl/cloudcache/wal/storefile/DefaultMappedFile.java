@@ -255,9 +255,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             int magic = slice.get(JAVA_INT, pos);
             pos += 4;
 
-            int version = slice.get(JAVA_INT, pos);
-            pos += 4;
-
             int checksum = slice.get(JAVA_INT, pos);
             pos += 4;
 
@@ -282,8 +279,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     valueLen
             );
             // 7. 构造 WalDataStruct 并返回（构造方法内含 CRC32 校验逻辑）
-            //    public WalDataStruct(int magic, int version, int checksum, int fromOffset, int dataLen, byte[] dataBytes) {
-            return new WalDataStruct(magic, version, checksum, 0, valueLen, valueBytes);
+            return new WalDataStruct(magic, checksum, 0, valueLen, valueBytes);
         } catch (Exception e) {
             log.error("getData: failed to read data from file={}, readOffset={}, size={}",
                     fileName, readOffset, size, e);
@@ -323,7 +319,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 close(); //文件设置为关闭
                 return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
             }
-            // 检查该数据是否跨逻辑Block了
+            // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
             long blockOffset = currentPos & (this.blockSize - 1);
             long remainingInBlock = this.blockSize - blockOffset;
             if (msgSize > remainingInBlock) {
@@ -353,8 +349,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
             manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
         }
-        //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中，最后调用core模块
-        int logicalIndex = Math.toIntExact(newPos / blockSize);
+        //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
+        //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
+        int logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(newPos, blockSize));
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         AppendMessageResult result = doAppend(currentPos, msgSize, dataStruct);
         result.setLogicalIndex(logicalIndex);
@@ -401,6 +398,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
         }
     }
+
 
     /**
      * 删除对应文件并释放资源的方法

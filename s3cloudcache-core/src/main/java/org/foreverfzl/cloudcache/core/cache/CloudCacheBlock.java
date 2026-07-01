@@ -1,9 +1,9 @@
 package org.foreverfzl.cloudcache.core.cache;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
-import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**
@@ -21,24 +21,25 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     private volatile long writePosition; //写指针
 
     //globalMemorySegment的一个切片
-    protected MemorySegment memorySegment;
+    protected final MemorySegment memorySegment;
     private final CacheBlockManager manager;
 
-    //逻辑位点层，这一部分在分配WAL文件写指针后确认的
-    //为了保证每个Block里面只能存放一个WAL文件的数据，如果为null说明该Block里面没有数据，否则代表该Block存放了对应文件的数据
-    private DefaultMappedFile mappedFile;
-    private volatile int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
-    private volatile long expectedValidBytes = 0; // 期待写入的总有效字节数
+    //逻辑位点层，这一部分在分配WAL文件写指针后确认
+    private String fileName;
+    private int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
+    protected static final AtomicIntegerFieldUpdater<CloudCacheBlock> EXPECTED_VALID_BYTES;
+    private volatile int expectedValidBytes = 0; // 期待写入的总有效字节数
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
+        EXPECTED_VALID_BYTES = AtomicIntegerFieldUpdater.newUpdater(CloudCacheBlock.class, "expectedValidBytes");
     }
 
-    public CloudCacheBlock(long blockFromOffset, int blockSize, MemorySegment memorySegment,CacheBlockManager manager) {
+    public CloudCacheBlock(long blockFromOffset, int blockSize, MemorySegment memorySegment, CacheBlockManager manager) {
         this.blockFromOffset = blockFromOffset;
         this.blockSize = blockSize;
         this.memorySegment = memorySegment;
-        this.manager=manager;
+        this.manager = manager;
     }
 
     /**
@@ -64,9 +65,28 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         return currentPosition;
     }
 
-    //获取指定区切片
-    public MemorySegment getMemorySegment(long fromOffset,long dataLen) {
-        return memorySegment.asSlice(fromOffset,dataLen);
+    //获取写指定区切片
+    public MemorySegment getWriteMemorySegment(long fromOffset, long dataLen) {
+        return memorySegment.asSlice(fromOffset, dataLen);
+    }
+
+    //获取上传指定分片区域
+    public MemorySegment getUpdateMemorySegment(){
+        return memorySegment.asSlice(0,writePosition);
+    }
+
+    //循环原子性的设置expectedValidBytes
+    public void setExpectedValidBytes(int curExpectedValidBytes) {
+        while (true) {
+            int expect = this.expectedValidBytes;
+            if (curExpectedValidBytes <= expect) {
+                return;
+            }
+            if (EXPECTED_VALID_BYTES.compareAndSet(this, expect, curExpectedValidBytes)) {
+                break;
+            }
+            Thread.onSpinWait();
+        }
     }
 
 
@@ -77,14 +97,18 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         // 1. 递减当前正在写入的线程数
         long refs = this.refCount.decrementAndGet();
         //最后一个线程看是否满足上传需求
-        if(refs==0&&expectedValidBytes==writePosition){
+        if (refs == 0 && expectedValidBytes == writePosition) {
             manager.updateBlock(this);
         }
     }
 
+    public int getExpectedValidBytes() {
+        return expectedValidBytes;
+    }
+
     @Override
     public void getReference() {
-         this.refCount.incrementAndGet();
+        this.refCount.incrementAndGet();
     }
 
     public String getS3Key() {
@@ -111,15 +135,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.writePosition = writePosition;
     }
 
-
-    public DefaultMappedFile getMappedFile() {
-        return mappedFile;
-    }
-
-    public void setMappedFile(DefaultMappedFile mappedFile) {
-        this.mappedFile = mappedFile;
-    }
-
     public int getLogicalIndex() {
         return logicalIndex;
     }
@@ -128,13 +143,20 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.logicalIndex = logicalIndex;
     }
 
+    public String getFileName() {
+        return fileName;
+    }
+
+    public void setFileName(String fileName) {
+        this.fileName = fileName;
+    }
 
     public void clean() {
         this.s3Key = null;
         this.writePosition = 0;
-        this.mappedFile = null;
         this.logicalIndex = 0;
         this.expectedValidBytes = 0;
         this.refCount.set(0);
+        this.expectedValidBytes = 0;
     }
 }

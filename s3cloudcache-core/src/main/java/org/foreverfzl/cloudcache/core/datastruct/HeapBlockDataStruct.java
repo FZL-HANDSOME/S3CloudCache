@@ -10,14 +10,16 @@ public class HeapBlockDataStruct implements BlockDataStruct{
 
     private final String fileName;
     private final int blockIndex;
+    private final int blockExpectedValidBytes;
     private final int fromOffset;
     private final int dataLen;
     private final byte[] dataBytes;
 
 
-    public HeapBlockDataStruct(String fileName, int blockIndex, byte[] dataBytes, int fromOffset, int dataLen) {
+    public HeapBlockDataStruct(String fileName, int blockIndex, int blockExpectedValidBytes, byte[] dataBytes, int fromOffset, int dataLen) {
         this.fileName = fileName;
         this.blockIndex = blockIndex;
+        this.blockExpectedValidBytes = blockExpectedValidBytes;
         this.dataBytes = dataBytes;
         this.fromOffset=fromOffset;
         this.dataLen=dataLen;
@@ -49,5 +51,9 @@ public class HeapBlockDataStruct implements BlockDataStruct{
     @Override
     public int getDataLen() {
         return dataLen;
+    }
+
+    public int getBlockExpectedValidBytes() {
+        return blockExpectedValidBytes;
     }
 }

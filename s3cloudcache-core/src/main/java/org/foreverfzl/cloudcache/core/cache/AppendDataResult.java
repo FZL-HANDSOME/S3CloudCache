@@ -7,7 +7,9 @@ package org.foreverfzl.cloudcache.core.cache;
  */
 public record AppendDataResult(String s3Key, long offset, int size, boolean result) {
 
-    public static AppendDataResult fail() {
-        return new AppendDataResult(null, -1, -1, false);
+    public static AppendDataResult fail(long offset, int size) {
+        return new AppendDataResult(null, offset, size, false);
     }
+
+
 }

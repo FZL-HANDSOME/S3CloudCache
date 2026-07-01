@@ -15,4 +15,8 @@ public interface BlockDataStruct {
 
     int getDataLen();
 
+    int getBlockExpectedValidBytes();
+
+
+
 }

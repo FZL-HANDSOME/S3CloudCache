@@ -10,13 +10,15 @@ public class DirectBlockDataStruct implements BlockDataStruct{
 
     private final String fileName;
     private final int blockIndex;
+    private final int blockExpectedValidBytes;
     private final int fromOffset;
     private final int dataLen;
     private final MemorySegment dataSegment;
 
-    public DirectBlockDataStruct(String fileName, int blockIndex, int fromOffset, int dataLen, MemorySegment dataSegment) {
+    public DirectBlockDataStruct(String fileName, int blockIndex, int blockExpectedValidBytes, int fromOffset, int dataLen, MemorySegment dataSegment) {
         this.fileName = fileName;
         this.blockIndex = blockIndex;
+        this.blockExpectedValidBytes = blockExpectedValidBytes;
         this.fromOffset = fromOffset;
         this.dataLen = dataLen;
         this.dataSegment = dataSegment;
@@ -47,5 +49,9 @@ public class DirectBlockDataStruct implements BlockDataStruct{
     @Override
     public int getDataLen() {
         return dataLen;
+    }
+
+    public int getBlockExpectedValidBytes() {
+        return blockExpectedValidBytes;
     }
 }

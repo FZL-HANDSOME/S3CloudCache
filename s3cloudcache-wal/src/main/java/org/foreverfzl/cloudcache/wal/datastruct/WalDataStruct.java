@@ -11,7 +11,6 @@ import java.util.zip.CRC32;
 public final class WalDataStruct implements DataStruct{
 
     private final int magic;
-    private final int version;
     private final int checksum;
     private final int fromOffset;
     private final int dataLen;
@@ -23,7 +22,6 @@ public final class WalDataStruct implements DataStruct{
             throw new IllegalArgumentException("Value bytes cannot be null");
         }
         this.magic = MAGIC_NUMBER;
-        this.version = 1;
         this.dataLen = dataBytes.length;
         this.dataBytes = dataBytes;
         this.fromOffset=0;
@@ -36,7 +34,6 @@ public final class WalDataStruct implements DataStruct{
             throw new IllegalArgumentException("Value bytes cannot be null");
         }
         this.magic=MAGIC_NUMBER;
-        this.version=1;
         this.fromOffset = fromOffset;
         this.dataLen = dataLen;
         this.dataBytes = dataBytes;
@@ -44,9 +41,8 @@ public final class WalDataStruct implements DataStruct{
     }
 
 
-    public WalDataStruct(int magic, int version, int checksum, int fromOffset, int dataLen, byte[] dataBytes) {
+    public WalDataStruct(int magic, int checksum, int fromOffset, int dataLen, byte[] dataBytes) {
         this.magic = magic;
-        this.version = version;
         this.checksum = checksum;
         this.fromOffset = fromOffset;
         this.dataLen = dataLen;
@@ -99,13 +95,6 @@ public final class WalDataStruct implements DataStruct{
         );
         pos+=4;
 
-        // 2. Version
-        target.set(
-                ValueLayout.JAVA_INT,
-                pos,
-                version
-        );
-        pos+=4;
 
         // 3. Checksum
         target.set(

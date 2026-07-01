@@ -217,5 +217,18 @@ public final class ProjectUtil {
                 + ".block";
     }
 
+    /**
+     * 除法：num1 / num2，位运算实现
+     * @param num1 被除数 非负
+     * @param num2 除数，必须是2的整数次幂
+     * @return 整除结果
+     */
+    public static long divideByPower(long num1, long num2) {
+        // 获取2的幂次，即右移位数
+        int shiftBits = Long.numberOfTrailingZeros(num2);
+        return num1 >> shiftBits;
+    }
+
+
 
 }

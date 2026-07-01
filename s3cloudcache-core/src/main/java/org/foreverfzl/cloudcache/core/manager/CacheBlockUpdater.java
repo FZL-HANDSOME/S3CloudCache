@@ -2,11 +2,16 @@ package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudchache.common.LogName;
+import org.foreverfzl.cloudchache.common.exception.CloudCacheException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 
+import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
@@ -14,7 +19,7 @@ import java.util.concurrent.Semaphore;
 /**
  * 专门用于将Block上传到S3服务器
  */
-public class CacheBlockUpdater {
+public class CacheBlockUpdater implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(LogName.CACHE_BLOCK_UPDATER);
     private final CacheBlockManager manager;
@@ -26,7 +31,7 @@ public class CacheBlockUpdater {
     // 2. 核心控制阀：利用信号量，把对 S3 的真正网络并发限制在安全范围内
     private final Semaphore upLoadLimiter;
 
-    public CacheBlockUpdater(CacheBlockManager manager,int blockUpLoadMaxCount, S3Client s3Client) {
+    public CacheBlockUpdater(CacheBlockManager manager, int blockUpLoadMaxCount, S3Client s3Client) {
         this.manager = manager;
         this.s3Client = s3Client;
         s3VirtualExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -47,7 +52,7 @@ public class CacheBlockUpdater {
                 // 成功后归还内存
                 manager.recycleBlock(block);
             } catch (Throwable t) {
-                log.warn("instance={},bucket={}:Failed to upload this block=>{}", manager.instanceName,manager.bucketName, block);
+                log.warn("instance={},bucket={}:Failed to upload this block=>{}", manager.instanceName, manager.bucketName, block);
                 handleUploadFailure(block);
             } finally {
                 // 4. 无论成功失败，释放令牌，让下一个块上云
@@ -57,10 +62,16 @@ public class CacheBlockUpdater {
     }
 
     /**
-     * 真正执行上传的方法
+     * 真正执行上传的方法，使用S3client进行上传
      */
     private void executeUpload(CloudCacheBlock block) {
-
+        // 只上传实际写入的数据
+        ByteBuffer byteBuffer = block.getUpdateMemorySegment().asByteBuffer();
+        PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(manager.bucketName)
+                .key(block.getS3Key())
+                .build();
+        s3Client.putObject(request, RequestBody.fromByteBuffer(byteBuffer));
     }
 
     /**
@@ -68,5 +79,10 @@ public class CacheBlockUpdater {
      */
     private void handleUploadFailure(CloudCacheBlock block) {
 
+    }
+
+    @Override
+    public void close() throws Exception {
+        s3VirtualExecutor.shutdown();
     }
 }

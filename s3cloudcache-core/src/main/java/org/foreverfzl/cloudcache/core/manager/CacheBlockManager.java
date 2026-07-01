@@ -12,7 +12,6 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.util.concurrent.*;
 
 /**
@@ -74,18 +73,45 @@ public class CacheBlockManager implements AutoCloseable {
             size = dataStruct.getDataLen();
             cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
+            //将block期望结束位置设置进去
+            cacheBlock.setExpectedValidBytes(dataStruct.getBlockExpectedValidBytes());
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
-            MemorySegment cacheBlockSegment = cacheBlock.getMemorySegment(curWritePosition,size);
+            MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
             //将数据写入Block
             dataStruct.writeTo(cacheBlockSegment);
         } catch (Exception e) {
-            return AppendDataResult.fail();
+            return AppendDataResult.fail(curWritePosition, size);
         } finally {
             //写完后释放引用
             if (cacheBlock != null) cacheBlock.releaseReference();
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true);
+    }
+
+    /**
+     *  失败后重试添加，
+     * @param dataStruct 数据
+     * @param fromOffset MemorySegment的起始位置
+     * @param size 数据大小
+     */
+    public AppendDataResult failToReAppendData(BlockDataStruct dataStruct,long fromOffset,int size) {
+        CloudCacheBlock cacheBlock = null;
+        try {
+            cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
+            cacheBlock.getReference();
+            //将block期望结束位置设置进去
+            cacheBlock.setExpectedValidBytes(dataStruct.getBlockExpectedValidBytes());
+            MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(fromOffset, size);
+            //将数据写入Block
+            dataStruct.writeTo(cacheBlockSegment);
+        } catch (Exception e) {
+            return AppendDataResult.fail(fromOffset, size);
+        } finally {
+            //写完后释放引用
+            if (cacheBlock != null) cacheBlock.releaseReference();
+        }
+        return new AppendDataResult(cacheBlock.getS3Key(), fromOffset, size, true);
     }
 
     /**
@@ -115,6 +141,8 @@ public class CacheBlockManager implements AutoCloseable {
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
             block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileName, blockIndex));
+            block.setFileName(fileName);
+            block.setLogicalIndex(blockIndex);
             keyBlockMap.put(cacheBlockKey, block);
             return block;
         }
@@ -128,7 +156,7 @@ public class CacheBlockManager implements AutoCloseable {
             return;
         }
         // 2. 从 K-V 映射中移除
-        String key = block.getMappedFile().getFileName() + "_" + block.getLogicalIndex();
+        String key = block.getFileName() + "_" + block.getLogicalIndex();
         keyBlockMap.remove(key);
         // 3. 清理 Block 的属性
         block.clean();
