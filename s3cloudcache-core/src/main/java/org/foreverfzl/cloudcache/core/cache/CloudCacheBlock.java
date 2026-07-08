@@ -27,12 +27,9 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     //逻辑位点层，这一部分在分配WAL文件写指针后确认
     private String fileName;
     private int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
-    protected static final AtomicIntegerFieldUpdater<CloudCacheBlock> EXPECTED_VALID_BYTES;
-    private volatile int expectedValidBytes = 0; // 期待写入的总有效字节数
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
-        EXPECTED_VALID_BYTES = AtomicIntegerFieldUpdater.newUpdater(CloudCacheBlock.class, "expectedValidBytes");
     }
 
     public CloudCacheBlock(long blockFromOffset, int blockSize, MemorySegment memorySegment, CacheBlockManager manager) {
@@ -71,22 +68,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     }
 
     //获取上传指定分片区域
-    public MemorySegment getUpdateMemorySegment(){
-        return memorySegment.asSlice(0,writePosition);
-    }
-
-    //循环原子性的设置expectedValidBytes
-    public void setExpectedValidBytes(int curExpectedValidBytes) {
-        while (true) {
-            int expect = this.expectedValidBytes;
-            if (curExpectedValidBytes <= expect) {
-                return;
-            }
-            if (EXPECTED_VALID_BYTES.compareAndSet(this, expect, curExpectedValidBytes)) {
-                break;
-            }
-            Thread.onSpinWait();
-        }
+    public MemorySegment getUpdateMemorySegment() {
+        return memorySegment.asSlice(0, writePosition);
     }
 
 
@@ -97,13 +80,11 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         // 1. 递减当前正在写入的线程数
         long refs = this.refCount.decrementAndGet();
         //最后一个线程看是否满足上传需求
-        if (refs == 0 && expectedValidBytes == writePosition) {
-            manager.updateBlock(this);
+        if (refs == 0) {
+            if (manager.blockMetaDataManager.canUpload(this.fileName, this.logicalIndex)) {
+                manager.updateBlock(this);
+            }
         }
-    }
-
-    public int getExpectedValidBytes() {
-        return expectedValidBytes;
     }
 
     @Override
@@ -154,9 +135,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     public void clean() {
         this.s3Key = null;
         this.writePosition = 0;
+        this.fileName = null;
         this.logicalIndex = 0;
-        this.expectedValidBytes = 0;
         this.refCount.set(0);
-        this.expectedValidBytes = 0;
     }
 }

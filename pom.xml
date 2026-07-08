@@ -15,6 +15,8 @@
 ├── s3cloudcache-wal           # 3. 主要实现数据的磁盘持久化和恢复，防止宕机导致堆外缓冲区数据丢失
 ├── s3cloudcache-storage       # 4. 云端存储适配模块 (对接 S3/MinIO)，模块提供对外API将数据上传到 云对象存储服务器
 └── s3cloudcache-test          # 5. 基准压测与集成测试模块 (JMH)
+├── s3cloudcache-metadata      # 6. Core和WAL模块的元数据共享模块
+└──
 
     -->
     <modules>
@@ -23,6 +25,7 @@
         <module>s3cloudcache-core</module>
         <module>s3cloudcache-storage</module>
         <module>s3cloudcache-test</module>
+        <module>s3cloudcache-metadata</module>
     </modules>
 
     <properties>

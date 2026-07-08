@@ -3,6 +3,7 @@ package org.foreverfzl.cloudcache.core.manager;
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -37,6 +38,8 @@ public class CacheBlockManager implements AutoCloseable {
     //block上传者
     private final CacheBlockUpdater blockUpdater;
 
+    //该bucket对应的元数据管理者
+    public BlockMetaDataManager blockMetaDataManager;
 
     public CacheBlockManager(String instanceName, String bucketName, S3Client s3Client, BucketConfig config) {
         this.config = config;
@@ -49,6 +52,7 @@ public class CacheBlockManager implements AutoCloseable {
         this.freeBlocks = new ArrayBlockingQueue<>(blockCount);
         this.keyBlockMap = new ConcurrentHashMap<>();
         blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client);
+        this.blockMetaDataManager=new BlockMetaDataManager();
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
             long offset = (long) i * config.blockSize;
@@ -73,8 +77,6 @@ public class CacheBlockManager implements AutoCloseable {
             size = dataStruct.getDataLen();
             cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
-            //将block期望结束位置设置进去
-            cacheBlock.setExpectedValidBytes(dataStruct.getBlockExpectedValidBytes());
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
@@ -100,8 +102,6 @@ public class CacheBlockManager implements AutoCloseable {
         try {
             cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
-            //将block期望结束位置设置进去
-            cacheBlock.setExpectedValidBytes(dataStruct.getBlockExpectedValidBytes());
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(fromOffset, size);
             //将数据写入Block
             dataStruct.writeTo(cacheBlockSegment);

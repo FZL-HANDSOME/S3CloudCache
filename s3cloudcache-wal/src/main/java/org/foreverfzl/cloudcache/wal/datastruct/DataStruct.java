@@ -32,6 +32,8 @@ public interface DataStruct {
      */
     long getSerializedSize();
 
+    int getDataLen();
+
 
 
 

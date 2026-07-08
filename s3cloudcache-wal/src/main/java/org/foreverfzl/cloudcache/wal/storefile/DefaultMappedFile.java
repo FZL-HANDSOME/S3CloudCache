@@ -312,25 +312,29 @@ public class DefaultMappedFile extends AbstractMappedFile {
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;
+        //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
+        //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
+        int logicalIndex;
         while (true) {
             currentPos = WROTE_POSITION_UPDATER.get(this);
             newPos = currentPos + msgSize;
-            if (newPos > this.fileSize) {
-                close(); //文件设置为关闭
-                return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
-            }
+            logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
             // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
             long blockOffset = currentPos & (this.blockSize - 1);
             long remainingInBlock = this.blockSize - blockOffset;
+            long paddingPos;
             if (msgSize > remainingInBlock) {
                 // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
-                long paddingPos = currentPos + remainingInBlock;
+                paddingPos = currentPos + remainingInBlock;
+                //看看文件是否结尾
                 if (paddingPos == this.fileSize) {
-                    close();
+                    manager.blockMetaDataManager.seal(this.fileName, logicalIndex); //将该block设置为封口
+                    close(); //关闭文件
                     return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
                 }
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                    manager.blockMetaDataManager.seal(this.fileName, logicalIndex); //将该block设置为封口
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
@@ -339,7 +343,21 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 Thread.onSpinWait();
                 continue;
             }
+            //检查该block是否已经封口
+            if (manager.blockMetaDataManager.isSealed(this.fileName, logicalIndex)) {
+                //封口了则尝试将指针设置为下一个Block起点
+                paddingPos = currentPos + remainingInBlock;
+                // 尝试 CAS 抢占这段残渣空间用来做 Padding
+                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                    // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
+                    doPadding(currentPos, (int) remainingInBlock);
+                    // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
+                    continue;
+                }
+                Thread.onSpinWait();
+            }
             if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
+                //抢成功跳出循环
                 break;
             }
             // CAS失败，提示CPU这是spin等待
@@ -349,12 +367,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
         if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
             manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
         }
-        //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
-        //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
-        int logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(newPos, blockSize));
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         AppendMessageResult result = doAppend(currentPos, msgSize, dataStruct);
-        result.setLogicalIndex(logicalIndex);
+        if (result.isOk()) {
+            //增加对应Block的期望字节数
+            manager.blockMetaDataManager.addExpectedBytes(this.fileName, logicalIndex, dataStruct.getDataLen());
+            result.setLogicalIndex(logicalIndex);
+        }
         return result;
     }
 
@@ -387,8 +406,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             dataStruct.writeTo(targetSlice);
             return new AppendMessageResult(
                     AppendMessageResult.AppendStatus.PUT_OK,
-                    writeOffset,
-                    size,
                     System.currentTimeMillis(),
                     this.fileName
             );

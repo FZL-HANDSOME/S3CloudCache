@@ -58,6 +58,11 @@ public final class WalDataStruct implements DataStruct{
         return (size + 3) & ~3;
     }
 
+    @Override
+    public int getDataLen() {
+        return dataLen;
+    }
+
     /**
      * 计算数据区域的CRC32校验和
      */

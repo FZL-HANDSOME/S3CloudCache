@@ -17,6 +17,7 @@ import java.nio.ByteBuffer;
  * 直接获取对应Bucket的操作句柄，适合高性能写数据
  */
 public class BucketWriterWriter extends AbstractBucketWriter {
+
     private static final Logger log= LoggerFactory.getLogger(LogName.BUCKET_INSTANCE);
 
     private final String bucketName;
@@ -41,7 +42,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 //            }
 ////public HeapBlockDataStruct(String fileName, int blockIndex, int blockExpectedValidBytes, byte[] dataBytes, int fromOffset, int dataLen)
 //            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getFileName(),result.getLogicalIndex()
-//                    ,result.getBlockExpectedValidBytes(),data,0,data.length);
+//                    ,data,0,data.length);
 //            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
 //            if(!blockResult.result()){
 //                log.warn("Block数据添加失败，blockResult==>{}",blockResult);
@@ -49,7 +50,6 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 //        } catch (Exception e) {
 //            log.error("Exception is=>",e);
 //        }
-//        return null;
         return null;
     }
 

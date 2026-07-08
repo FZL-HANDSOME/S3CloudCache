@@ -16,62 +16,37 @@ public class AppendMessageResult {
      */
     private final String fileName;
 
-
     /**
-     * 数据写入的起始偏移量（相对于文件起始）
+     * 该数据在改文件的哪逻辑Block中
      */
-    private final long wroteOffset;
-
-    /**
-     * 实际写入的字节数
-     */
-    private final long wroteBytes;
+    private int logicalIndex;
 
     /**
      * 写入时的时间戳
      */
     private final long storeTimestamp;
 
-    /**
-     * 该数据在改文件的哪逻辑Block中
-     */
-    private int logicalIndex;
-
 
     public AppendMessageResult(AppendStatus status, String fileName) {
         this.status = status;
         this.fileName = fileName;
-        wroteOffset = -1;
-        wroteBytes = -1;
         storeTimestamp = -1;
         logicalIndex = -1;
     }
 
-    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
-                               long storeTimestamp, String fileName) {
+    public AppendMessageResult(AppendStatus status,long storeTimestamp, String fileName) {
         this.status = status;
-        this.wroteOffset = wroteOffset;
-        this.wroteBytes = wroteBytes;
         this.storeTimestamp = storeTimestamp;
         this.fileName = fileName;
         logicalIndex = -1;
     }
 
-    public AppendMessageResult(AppendStatus status, long wroteOffset, long wroteBytes,
-                               long storeTimestamp, String fileName, int logicalIndex) {
-        this.status = status;
-        this.wroteOffset = wroteOffset;
-        this.wroteBytes = wroteBytes;
-        this.storeTimestamp = storeTimestamp;
-        this.fileName = fileName;
-        this.logicalIndex = logicalIndex;
-    }
 
     /**
      * 创建一个表示失败的结果（不携带偏移和字节数信息）
      */
     public static AppendMessageResult fail(AppendStatus status, String fileName) {
-        return new AppendMessageResult(status, -1, 0, System.currentTimeMillis(), fileName);
+        return new AppendMessageResult(status, System.currentTimeMillis(), fileName);
     }
 
 
@@ -120,14 +95,6 @@ public class AppendMessageResult {
         return status;
     }
 
-    public long getWroteOffset() {
-        return wroteOffset;
-    }
-
-    public long getWroteBytes() {
-        return wroteBytes;
-    }
-
     public long getStoreTimestamp() {
         return storeTimestamp;
     }
@@ -149,10 +116,8 @@ public class AppendMessageResult {
         return "AppendMessageResult{" +
                 "status=" + status +
                 ", fileName='" + fileName + '\'' +
-                ", wroteOffset=" + wroteOffset +
-                ", wroteBytes=" + wroteBytes +
-                ", storeTimestamp=" + storeTimestamp +
                 ", logicalIndex=" + logicalIndex +
+                ", storeTimestamp=" + storeTimestamp +
                 '}';
     }
 }

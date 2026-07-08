@@ -1,5 +1,6 @@
 package org.foreverfzl.cloudcache.wal.manager;
 
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
@@ -60,6 +61,9 @@ public class MappedFileManager implements AutoCloseable {
     //到达水位线 创建新文件的时候都会使用这个线程池
     private static final ExecutorService createNewFileExecutor = Executors.newSingleThreadExecutor();
 
+    //该bucket对应的元数据管理者
+    public BlockMetaDataManager blockMetaDataManager;
+
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
@@ -68,6 +72,7 @@ public class MappedFileManager implements AutoCloseable {
         this.prefixFile = saveBucketPrefix(config.s3KeyPrefix); //保存前缀
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
+        this.blockMetaDataManager=new BlockMetaDataManager();
         flushReadPositionThread = new Thread(new Runnable() {
             @Override
             public void run() {
