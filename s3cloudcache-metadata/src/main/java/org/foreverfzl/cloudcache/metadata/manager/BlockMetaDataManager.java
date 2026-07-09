@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -11,6 +12,32 @@ import java.util.concurrent.ConcurrentHashMap;
 public class BlockMetaDataManager {
 
     private final ConcurrentHashMap<String, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
+    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
+    public BlockUpLoadQueueManager blockUpLoadQueueManager;
+
+    public BlockMetaDataManager() {
+        blockUpLoadQueueManager = new BlockUpLoadQueueManager();
+    }
+
+    public void chackLastActiveTime(String fileName, int blockIndex, long curTime, long maxFreeTime) {
+        BlockMetaData blockMetaData = metaDataMap.get(buildKey(fileName, blockIndex));
+        if (blockMetaData == null) {
+            return;
+        }
+        if (blockMetaData.getState() != BlockMetaData.OPEN) {
+            //如果不是开放状态则不检查
+            return;
+        }
+        //计算差值
+        long delta = curTime - blockMetaData.getLastActiveTime();
+        if (delta <= maxFreeTime) {
+            //不满足时间差
+            return;
+        }
+        //封口然后放入到上传队列中
+        blockMetaData.trySeal();
+        blockUpLoadQueueManager.submit(new UploadTask( fileName, blockIndex));
+    }
 
     /**
      * 获取或者创建BlockMetaData
@@ -37,23 +64,53 @@ public class BlockMetaDataManager {
      * 增加期待写入字节数
      */
     public void addExpectedBytes(String fileName, int blockIndex, int bytes) {
-        getOrCreate(fileName, blockIndex).addExpectedBytes(bytes);
+        BlockMetaData blockMetaData = getOrCreate(fileName, blockIndex);
+        blockMetaData.addExpectedBytes(bytes);
+        blockMetaData.updateLastTime();
     }
 
     /**
      * 增加已经完成写入字节数
      */
     public void addFinishedBytes(String fileName, int blockIndex, int bytes) {
-        getOrCreate(fileName, blockIndex).addFinishedBytes(bytes);
+        get(fileName, blockIndex).addFinishedBytes(bytes);
     }
 
     /**
      * CAS封口
-     * true:本线程完成封口
-     * false:已经被其它线程封口
      */
-    public void seal(String fileName, int blockIndex) {
-        getOrCreate(fileName, blockIndex).setState(1);
+    public void trySeal(String fileName, int blockIndex) {
+        get(fileName, blockIndex).trySeal();
+    }
+
+
+    /**
+     * CAS改为上传中
+     */
+    public void tryStartUpload(String fileName, int blockIndex) {
+        get(fileName, blockIndex).tryStartUpload();
+    }
+
+
+    /**
+     * CAS改为上传完成
+     */
+    public void markUploadSuccess(String fileName, int blockIndex) {
+        get(fileName, blockIndex).markUploadSuccess();
+    }
+
+    /**
+     * CAS改为上传失败
+     */
+    public void markUploadFailed(String fileName, int blockIndex) {
+        get(fileName, blockIndex).markUploadFailed();
+    }
+
+    /**
+     * CAS改将上传失败改为上传中
+     */
+    public void retryUpload(String fileName, int blockIndex) {
+        get(fileName, blockIndex).retryUpload();
     }
 
     /**

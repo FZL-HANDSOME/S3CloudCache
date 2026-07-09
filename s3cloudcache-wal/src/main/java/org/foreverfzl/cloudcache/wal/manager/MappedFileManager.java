@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * 这个类专门管理该Bucket存在的文件
  */
-public class MappedFileManager implements AutoCloseable {
+public class MappedFileManager {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
     public final String instanceName;
     public final String bucketName;
@@ -44,7 +44,7 @@ public class MappedFileManager implements AutoCloseable {
     //该bucket的wal目录绝对地址
     private final String dirPath;
     //Bucket级别配置文件
-    private final BucketConfig config;
+    public final BucketConfig config;
     //WAL持久化文件地址
     private final String WAL_FILE_PATH;
 
@@ -61,8 +61,9 @@ public class MappedFileManager implements AutoCloseable {
     //到达水位线 创建新文件的时候都会使用这个线程池
     private static final ExecutorService createNewFileExecutor = Executors.newSingleThreadExecutor();
 
-    //该bucket对应的元数据管理者
+    //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
+
 
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
         this.instanceName = instanceName;
@@ -258,8 +259,11 @@ public class MappedFileManager implements AutoCloseable {
 
     }
 
+    public AtomicReference<DefaultMappedFile> getActiveMappedFile() {
+        return activeMappedFile;
+    }
+
     //todo
-    @Override
     public void close() throws Exception {
         createNewFileExecutor.shutdown();
     }

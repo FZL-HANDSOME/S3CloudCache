@@ -2,17 +2,36 @@ package org.foreverfzl.cloudcache.metadata.entity;
 
 
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 public class BlockMetaData {
 
-    //0代表开放，1代表封口上传
+    //0代表开放，1代表封口，2代表上传中，3代表上传成功，4代表上传失败
+    //           OPEN(0)
+    //              │
+    //              ▼
+    //         SEALED(1)
+    //              │
+    //              ▼
+    //      UPLOADING(2)
+    //         │         │
+    //         ▼         ▼
+    //SUCCESS(3)   FAILED(4)
+    public static final int OPEN = 0;
+    public static final int SEALED = 1;
+    public static final int UPLOADING = 2;
+    public static final int SUCCESS = 3;
+    public static final int FAILED = 4;
+    private static final AtomicIntegerFieldUpdater<BlockMetaData> STATE_UPDATER;
     private volatile int state;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> EXPECTED_BYTES_UPDATER;
     private volatile int expectedBytes;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile int finishedBytes;
+    private volatile long lastActiveTime;
 
     static {
+        STATE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "state");
         EXPECTED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "expectedBytes");
         FINISHED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "finishedBytes");
     }
@@ -21,6 +40,32 @@ public class BlockMetaData {
         this.state = 0;
         this.expectedBytes = 0;
         this.finishedBytes = 0;
+        this.lastActiveTime = System.currentTimeMillis();
+    }
+
+    //尝试将Block设置为封口
+    public boolean trySeal() {
+        return STATE_UPDATER.compareAndSet(this, OPEN, SEALED);
+    }
+
+    //尝试将Block设置为上传
+    public boolean tryStartUpload() {
+        return STATE_UPDATER.compareAndSet(this, SEALED, UPLOADING);
+    }
+
+    //尝试将Block设置上传成功
+    public boolean markUploadSuccess() {
+        return STATE_UPDATER.compareAndSet(this, UPLOADING, SUCCESS);
+    }
+
+    //尝试将Block设置为上传失败
+    public boolean markUploadFailed() {
+        return STATE_UPDATER.compareAndSet(this, UPLOADING, FAILED);
+    }
+
+    //尝试将Block设置为上传中，一般重试上传的时候会用
+    public boolean retryUpload() {
+        return STATE_UPDATER.compareAndSet(this, FAILED, UPLOADING);
     }
 
     public void addExpectedBytes(int val) {
@@ -41,8 +86,12 @@ public class BlockMetaData {
         } while (!FINISHED_BYTES_UPDATER.compareAndSet(this, current, next));
     }
 
-    public void setState(int val) {
-        this.state = val;
+    public void updateLastTime() {
+        this.lastActiveTime = System.currentTimeMillis(); //这里可以容纳误差，简单赋值即可
+    }
+
+    public int getFinishedBytes() {
+        return finishedBytes;
     }
 
     public int getState() {
@@ -53,7 +102,7 @@ public class BlockMetaData {
         return expectedBytes;
     }
 
-    public int getFinishedBytes() {
-        return finishedBytes;
+    public long getLastActiveTime() {
+        return lastActiveTime;
     }
 }

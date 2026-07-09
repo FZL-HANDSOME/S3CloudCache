@@ -25,6 +25,7 @@ public class CoreInstanceBucketManager {
     private final S3CloudCacheConfig config;
 
 
+
     public CoreInstanceBucketManager(String instanceName, S3Client s3Client, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.s3Client = s3Client;
@@ -35,7 +36,6 @@ public class CoreInstanceBucketManager {
             locks[i] = new ReentrantLock();
         }
     }
-
 
     public AppendDataResult appendData(String bucketName, BlockDataStruct dataStruct) {
         CacheBlockManager blockManager = getOrCreateBlockManager(bucketName);

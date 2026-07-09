@@ -38,6 +38,12 @@ public class S3CloudCacheConfig {
      * 用户指定的持久化目录
      */
     public String walPath = null;
+
+    /**
+     * 一个Block最大的空闲时间，如果一个Block M毫秒内没有新的数据写入，自动封口上传数据(可以理解为一个Bucket的最大空闲时间，超过这个时间自动上传)
+     */
+    public Integer blockMaxIdleTime = 20000;
+
     /**
      * 默认配置文件
      */

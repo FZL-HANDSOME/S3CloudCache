@@ -14,6 +14,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.services.s3.S3Client;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
 
 public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     private static final Logger log= LoggerFactory.getLogger(LogName.CLOUD_CACHE_INSTANCE);
@@ -48,7 +51,6 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         walInstanceBucketManager = new WalInstanceBucketManager(instanceName, instanceDirPath, config);
         coreInstanceBucketManager = new CoreInstanceBucketManager(instanceName, s3Client, config);
     }
-
 
     /**
      * 获取BucketName对应的Bucket操作句柄

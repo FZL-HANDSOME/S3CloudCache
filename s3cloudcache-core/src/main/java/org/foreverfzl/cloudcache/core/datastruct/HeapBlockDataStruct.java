@@ -26,15 +26,20 @@ public class HeapBlockDataStruct implements BlockDataStruct{
     }
 
     @Override
-    public void writeTo(MemorySegment target) {
-        MemorySegment.copy(
-                dataBytes,
-                fromOffset,
-                target,
-                ValueLayout.JAVA_BYTE,
-                0,
-                dataLen
-        );
+    public boolean writeTo(MemorySegment target) {
+        try {
+            MemorySegment.copy(
+                    dataBytes,
+                    fromOffset,
+                    target,
+                    ValueLayout.JAVA_BYTE,
+                    0,
+                    dataLen
+            );
+            return true;
+        }catch (Exception e){
+            return false;
+        }
     }
 
     @Override

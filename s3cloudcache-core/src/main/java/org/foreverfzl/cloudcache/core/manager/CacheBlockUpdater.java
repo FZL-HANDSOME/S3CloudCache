@@ -19,7 +19,7 @@ import java.util.concurrent.Semaphore;
 /**
  * 专门用于将Block上传到S3服务器
  */
-public class CacheBlockUpdater implements AutoCloseable {
+public class CacheBlockUpdater {
 
     private static final Logger log = LoggerFactory.getLogger(LogName.CACHE_BLOCK_UPDATER);
     private final CacheBlockManager manager;
@@ -47,6 +47,8 @@ public class CacheBlockUpdater implements AutoCloseable {
             try {
                 // 3. 必须先抢到网络准入令牌，抢不到的虚拟线程会被 JVM 自动、高效地卸载挂起
                 upLoadLimiter.acquire();
+                //先将元数据改为上传中
+
                 // 执行重度网络 I/O
                 executeUpload(block);
                 // 成功后归还内存
@@ -81,7 +83,6 @@ public class CacheBlockUpdater implements AutoCloseable {
 
     }
 
-    @Override
     public void close() throws Exception {
         s3VirtualExecutor.shutdown();
     }

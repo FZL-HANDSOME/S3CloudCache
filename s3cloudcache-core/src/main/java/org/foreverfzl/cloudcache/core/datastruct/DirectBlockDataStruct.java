@@ -25,15 +25,20 @@ public class DirectBlockDataStruct implements BlockDataStruct{
     }
 
     @Override
-    public void writeTo(MemorySegment target) {
-        MemorySegment.copy(
-                dataSegment,
-                fromOffset,
-                target,
-                ValueLayout.JAVA_BYTE,
-                0,
-                dataLen
-        );
+    public boolean writeTo(MemorySegment target) {
+        try {
+            MemorySegment.copy(
+                    dataSegment,
+                    fromOffset,
+                    target,
+                    ValueLayout.JAVA_BYTE,
+                    0,
+                    dataLen
+            );
+            return true;
+        }catch (Exception e){
+            return false;
+        }
     }
 
     @Override

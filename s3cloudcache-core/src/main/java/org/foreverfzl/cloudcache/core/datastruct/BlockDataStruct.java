@@ -7,7 +7,7 @@ import java.lang.foreign.MemorySegment;
  */
 public interface BlockDataStruct {
 
-    void writeTo(MemorySegment target);
+    boolean writeTo(MemorySegment target);
 
     String getFileName();
 

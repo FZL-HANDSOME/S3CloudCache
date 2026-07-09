@@ -3,7 +3,6 @@ package org.foreverfzl.cloudcache.core.cache;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 
 import java.lang.foreign.MemorySegment;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**

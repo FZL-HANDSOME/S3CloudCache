@@ -3,7 +3,9 @@ package org.foreverfzl.cloudcache.core.manager;
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
+import org.foreverfzl.cloudcache.metadata.manager.BlockUpLoadQueueManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -18,7 +20,7 @@ import java.util.concurrent.*;
 /**
  * 用于管理一个Bucket的所有Block，也可以理解为那个默认1GB的堆外缓冲区，也就是Block池
  */
-public class CacheBlockManager implements AutoCloseable {
+public class CacheBlockManager {
 
     private static final Logger log = LoggerFactory.getLogger(LogName.CACHE_BLOCK_MANAGER);
 
@@ -32,14 +34,21 @@ public class CacheBlockManager implements AutoCloseable {
     // 空闲/干净的 CloudCacheBlock 池
     private final BlockingQueue<CloudCacheBlock> freeBlocks;
 
-    // 根据自定义 key 维护的 K-V 映射，key为fileName+BlockIndex
+    // 根据自定义 key 维护的 K-V 映射，key为fileName+_+BlockIndex
     private final ConcurrentHashMap<String, CloudCacheBlock> keyBlockMap;
 
     //block上传者
     private final CacheBlockUpdater blockUpdater;
 
-    //该bucket对应的元数据管理者
+    //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
+
+    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
+    public BlockUpLoadQueueManager blockUpLoadQueueManager;
+
+    //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
+    private volatile boolean activeQueueTaskThread = true;
+    private final Thread getBlockUpLoadQueueTaskThread;
 
     public CacheBlockManager(String instanceName, String bucketName, S3Client s3Client, BucketConfig config) {
         this.config = config;
@@ -52,15 +61,35 @@ public class CacheBlockManager implements AutoCloseable {
         this.freeBlocks = new ArrayBlockingQueue<>(blockCount);
         this.keyBlockMap = new ConcurrentHashMap<>();
         blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client);
-        this.blockMetaDataManager=new BlockMetaDataManager();
+        this.blockMetaDataManager = new BlockMetaDataManager();
+        this.blockUpLoadQueueManager = blockMetaDataManager.blockUpLoadQueueManager;
+        getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
             long offset = (long) i * config.blockSize;
             CloudCacheBlock block = new CloudCacheBlock(offset, config.blockSize, globalMemorySegment.asSlice(offset, config.blockSize), this);
             freeBlocks.add(block);
         }
+        getBlockUpLoadQueueTaskThread.start();
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
                 config.cacheSize, config.blockSize, blockCount, config.blockUpLoadCount);
+    }
+
+
+    private void getBlockUpLoadQueue() {
+        while (activeQueueTaskThread){
+            try {
+                UploadTask task = blockUpLoadQueueManager.take();
+                CloudCacheBlock cacheBlock = keyBlockMap.get(buildBlockKey(task.getFileName(), task.getLogicalIndex()));
+                if(cacheBlock==null){
+                    return;
+                }
+                //上传
+                blockUpdater.upLoadBlock(cacheBlock);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     /**
@@ -81,7 +110,10 @@ public class CacheBlockManager implements AutoCloseable {
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
             //将数据写入Block
-            dataStruct.writeTo(cacheBlockSegment);
+            boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
+            if (isSuccess) {
+                blockMetaDataManager.addFinishedBytes(dataStruct.getFileName(), dataStruct.getBlockIndex(), size);
+            }
         } catch (Exception e) {
             return AppendDataResult.fail(curWritePosition, size);
         } finally {
@@ -92,12 +124,13 @@ public class CacheBlockManager implements AutoCloseable {
     }
 
     /**
-     *  失败后重试添加，
+     * 失败后重试添加，
+     *
      * @param dataStruct 数据
      * @param fromOffset MemorySegment的起始位置
-     * @param size 数据大小
+     * @param size       数据大小
      */
-    public AppendDataResult failToReAppendData(BlockDataStruct dataStruct,long fromOffset,int size) {
+    public AppendDataResult failToReAppendData(BlockDataStruct dataStruct, long fromOffset, int size) {
         CloudCacheBlock cacheBlock = null;
         try {
             cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
@@ -118,6 +151,7 @@ public class CacheBlockManager implements AutoCloseable {
      * 上传Block
      */
     public void updateBlock(CloudCacheBlock cacheBlock) {
+        //将block元数据设置为上传中
         blockUpdater.upLoadBlock(cacheBlock);
     }
 
@@ -126,7 +160,7 @@ public class CacheBlockManager implements AutoCloseable {
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
     private CloudCacheBlock getBlock(String fileName, int blockIndex) throws InterruptedException {
-        String cacheBlockKey = fileName + "_" + blockIndex;
+        String cacheBlockKey = buildBlockKey(fileName,blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
         if (existingBlock != null) {
@@ -156,7 +190,7 @@ public class CacheBlockManager implements AutoCloseable {
             return;
         }
         // 2. 从 K-V 映射中移除
-        String key = block.getFileName() + "_" + block.getLogicalIndex();
+        String key = buildBlockKey(block.getFileName(),block.getLogicalIndex());
         keyBlockMap.remove(key);
         // 3. 清理 Block 的属性
         block.clean();
@@ -164,9 +198,12 @@ public class CacheBlockManager implements AutoCloseable {
         freeBlocks.put(block);
     }
 
+    private String buildBlockKey(String fileName,int blockIndex){
+        return fileName+"_"+blockIndex;
+    }
+
 
     //todo
-    @Override
     public void close() {
         if (arena != null) {
             try {

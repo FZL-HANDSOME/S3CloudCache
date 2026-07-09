@@ -38,7 +38,7 @@ public class BucketConfig {
     /**
      * 是否预热WAL文件
      */
-    public Boolean isWarmWalFile=true;
+    public Boolean isWarmWalFile = true;
 
     /**
      * 是否锁定持久化文件对应的操作系统PageCache缓冲区
@@ -50,7 +50,8 @@ public class BucketConfig {
 
     }
 
-    public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount, Long pageFlushLevel, Boolean isWarmWalFile, Boolean isLockMappedFilePageCache) {
+    public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount, Long pageFlushLevel,
+                        Boolean isWarmWalFile, Boolean isLockMappedFilePageCache) {
         this.s3KeyPrefix = s3KeyPrefix;
         this.walFileSize = walFileSize;
         this.cacheSize = cacheSize;
@@ -100,4 +101,6 @@ public class BucketConfig {
         isLockMappedFilePageCache = lockMappedFilePageCache;
         return this;
     }
+
+
 }

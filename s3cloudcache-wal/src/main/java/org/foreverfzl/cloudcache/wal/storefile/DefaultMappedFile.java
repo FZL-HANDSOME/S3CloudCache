@@ -328,13 +328,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 paddingPos = currentPos + remainingInBlock;
                 //看看文件是否结尾
                 if (paddingPos == this.fileSize) {
-                    manager.blockMetaDataManager.seal(this.fileName, logicalIndex); //将该block设置为封口
+                    manager.blockMetaDataManager.trySeal(this.fileName, logicalIndex); //将该block设置为封口
                     close(); //关闭文件
                     return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
                 }
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                    manager.blockMetaDataManager.seal(this.fileName, logicalIndex); //将该block设置为封口
+                    manager.blockMetaDataManager.trySeal(this.fileName, logicalIndex); //将该block设置为封口
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
