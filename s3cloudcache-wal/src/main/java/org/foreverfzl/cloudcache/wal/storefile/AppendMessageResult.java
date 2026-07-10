@@ -14,7 +14,7 @@ public class AppendMessageResult {
     /**
      * 写入的目标文件名
      */
-    private final String fileName;
+    private final long fileFromOffset;
 
     /**
      * 该数据在改文件的哪逻辑Block中
@@ -27,17 +27,17 @@ public class AppendMessageResult {
     private final long storeTimestamp;
 
 
-    public AppendMessageResult(AppendStatus status, String fileName) {
+    public AppendMessageResult(AppendStatus status, long fileFromOffset) {
         this.status = status;
-        this.fileName = fileName;
+        this.fileFromOffset = fileFromOffset;
         storeTimestamp = -1;
         logicalIndex = -1;
     }
 
-    public AppendMessageResult(AppendStatus status,long storeTimestamp, String fileName) {
+    public AppendMessageResult(AppendStatus status,long storeTimestamp, long fileFromOffset) {
         this.status = status;
         this.storeTimestamp = storeTimestamp;
-        this.fileName = fileName;
+        this.fileFromOffset = fileFromOffset;
         logicalIndex = -1;
     }
 
@@ -45,8 +45,8 @@ public class AppendMessageResult {
     /**
      * 创建一个表示失败的结果（不携带偏移和字节数信息）
      */
-    public static AppendMessageResult fail(AppendStatus status, String fileName) {
-        return new AppendMessageResult(status, System.currentTimeMillis(), fileName);
+    public static AppendMessageResult fail(AppendStatus status, long fileFromOffset) {
+        return new AppendMessageResult(status, System.currentTimeMillis(), fileFromOffset);
     }
 
 
@@ -99,8 +99,8 @@ public class AppendMessageResult {
         return storeTimestamp;
     }
 
-    public String getFileName() {
-        return fileName;
+    public long getFileFromOffset() {
+        return fileFromOffset;
     }
 
     public int getLogicalIndex() {
@@ -115,7 +115,7 @@ public class AppendMessageResult {
     public String toString() {
         return "AppendMessageResult{" +
                 "status=" + status +
-                ", fileName='" + fileName + '\'' +
+                ", fileFromOffset=" + fileFromOffset +
                 ", logicalIndex=" + logicalIndex +
                 ", storeTimestamp=" + storeTimestamp +
                 '}';

@@ -3,6 +3,7 @@ package org.foreverfzl.cloudcache.core.global;
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
@@ -25,7 +26,6 @@ public class CoreInstanceBucketManager {
     private final S3CloudCacheConfig config;
 
 
-
     public CoreInstanceBucketManager(String instanceName, S3Client s3Client, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.s3Client = s3Client;
@@ -37,24 +37,11 @@ public class CoreInstanceBucketManager {
         }
     }
 
-    public AppendDataResult appendData(String bucketName, BlockDataStruct dataStruct) {
-        CacheBlockManager blockManager = getOrCreateBlockManager(bucketName);
-        if (blockManager == null) {
-            throw new WalException("can not find blockManager");
-        }
-        AppendDataResult appendDataResult = blockManager.appendData(dataStruct);
-        if (!appendDataResult.result()) {
-            //失败后重试
-            appendDataResult=blockManager.failToReAppendData(dataStruct,appendDataResult.offset(),appendDataResult.size());
-        }
-        //如果失败了
-        return appendDataResult;
-    }
 
     /**
-     * 根据bucket获取对应的BlockManager，没有则创建
+     * 根据bucket获取对应的BlockManager
      */
-    public CacheBlockManager getOrCreateBlockManager(String bucketName) {
+    public CacheBlockManager getOrCreateBlockManager(String bucketName, BlockMetaDataManager blockMetaDataManager) {
         // 第一次无锁查询
         CacheBlockManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -72,7 +59,7 @@ public class CoreInstanceBucketManager {
             // 创建新的BlockManager
             BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
             BucketConfig realConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
-            manager = new CacheBlockManager(instanceName, bucketName, s3Client, realConfig);
+            manager = new CacheBlockManager(instanceName, bucketName, blockMetaDataManager, s3Client, realConfig);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {
@@ -83,5 +70,9 @@ public class CoreInstanceBucketManager {
     //通过hash分桶获取对应的Lock对象
     private ReentrantLock getLock(String bucketName) {
         return locks[bucketName.hashCode() & (LOCKS_COUNT - 1)];
+    }
+
+    public void close(){
+
     }
 }

@@ -264,7 +264,7 @@ public class MappedFileManager {
     }
 
     //todo
-    public void close() throws Exception {
+    public void close() {
         createNewFileExecutor.shutdown();
     }
 }

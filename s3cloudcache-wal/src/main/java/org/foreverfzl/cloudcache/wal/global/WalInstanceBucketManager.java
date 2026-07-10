@@ -15,8 +15,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.util.Collection;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -71,7 +69,7 @@ public class WalInstanceBucketManager {
                 int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(wrotePosition, blockSize));
                 //获取该fileManager对应的元数据管理者
                 BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                blockMetaDataManager.chackLastActiveTime(activeFile.getFileName(), blockIndex, curTime, blockMaxIdleTime);
+                blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
             }
         } catch (Exception e) {
             log.warn("checkBlockMeta Task Failed");
@@ -79,15 +77,6 @@ public class WalInstanceBucketManager {
     }
 
 
-    //WalInstanceBucketManager的appendData只是路由作用
-    public AppendMessageResult appendData(String bucketName, DataStruct dataStruct) {
-        MappedFileManager bucketFileManager = getOrCreateBucketFileManager(bucketName);
-        if (bucketFileManager == null) {
-            throw new WalException("can not find MappedFileManager");
-        }
-        AppendMessageResult result = bucketFileManager.appendData(dataStruct);
-        return result;
-    }
 
 
     /**
@@ -124,7 +113,7 @@ public class WalInstanceBucketManager {
         return locks[bucketName.hashCode() & (LOCKS_COUNT - 1)];
     }
 
-    public void close() throws Exception {
+    public void close() {
         checkBlockMetaExecutor.close();
     }
 }

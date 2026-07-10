@@ -24,7 +24,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     private final CacheBlockManager manager;
 
     //逻辑位点层，这一部分在分配WAL文件写指针后确认
-    private String fileName;
+    private long fileFromOffset;
     private int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
 
     static {
@@ -80,7 +80,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         long refs = this.refCount.decrementAndGet();
         //最后一个线程看是否满足上传需求
         if (refs == 0) {
-            if (manager.blockMetaDataManager.canUpload(this.fileName, this.logicalIndex)) {
+            if (manager.blockMetaDataManager.canUpload(this.fileFromOffset, this.logicalIndex)) {
                 manager.updateBlock(this);
             }
         }
@@ -123,18 +123,18 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.logicalIndex = logicalIndex;
     }
 
-    public String getFileName() {
-        return fileName;
+    public long getFileFromOffset() {
+        return fileFromOffset;
     }
 
-    public void setFileName(String fileName) {
-        this.fileName = fileName;
+    public void setFileFromOffset(long fileFromOffset) {
+        this.fileFromOffset = fileFromOffset;
     }
 
     public void clean() {
         this.s3Key = null;
         this.writePosition = 0;
-        this.fileName = null;
+        this.fileFromOffset = 0;
         this.logicalIndex = 0;
         this.refCount.set(0);
     }

@@ -302,11 +302,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final DataStruct dataStruct) {
-        if (!isAvailable()) return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileName);
+        if (!isAvailable()) return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
         // 1. 参数校验
         if (dataStruct == null) {
             log.warn("appendData: walDataStruct cannot be null, fileName={}", fileName);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
+            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileFromOffset);
         }
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
@@ -328,13 +328,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 paddingPos = currentPos + remainingInBlock;
                 //看看文件是否结尾
                 if (paddingPos == this.fileSize) {
-                    manager.blockMetaDataManager.trySeal(this.fileName, logicalIndex); //将该block设置为封口
+                    manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                     close(); //关闭文件
-                    return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileName);
+                    return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
                 }
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                    manager.blockMetaDataManager.trySeal(this.fileName, logicalIndex); //将该block设置为封口
+                    manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
@@ -344,7 +344,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 continue;
             }
             //检查该block是否已经封口
-            if (manager.blockMetaDataManager.isSealed(this.fileName, logicalIndex)) {
+            if (manager.blockMetaDataManager.isSealed(this.fileFromOffset, logicalIndex)) {
                 //封口了则尝试将指针设置为下一个Block起点
                 paddingPos = currentPos + remainingInBlock;
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
@@ -371,8 +371,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         AppendMessageResult result = doAppend(currentPos, msgSize, dataStruct);
         if (result.isOk()) {
             //增加对应Block的期望字节数
-            manager.blockMetaDataManager.addExpectedBytes(this.fileName, logicalIndex, dataStruct.getDataLen());
             result.setLogicalIndex(logicalIndex);
+            manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataStruct.getDataLen());
         }
         return result;
     }
@@ -407,12 +407,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return new AppendMessageResult(
                     AppendMessageResult.AppendStatus.PUT_OK,
                     System.currentTimeMillis(),
-                    this.fileName
+                    this.fileFromOffset
             );
         } catch (Exception e) {
             log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}",
                     writeOffset, size, fileName, e);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileName);
+            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileFromOffset);
         }
     }
 

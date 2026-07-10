@@ -2,6 +2,7 @@ package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
+import org.foreverfzl.cloudchache.common.ProjectUtil;
 
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -11,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class BlockMetaDataManager {
 
-    private final ConcurrentHashMap<String, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
     //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
     public BlockUpLoadQueueManager blockUpLoadQueueManager;
 
@@ -19,8 +20,8 @@ public class BlockMetaDataManager {
         blockUpLoadQueueManager = new BlockUpLoadQueueManager();
     }
 
-    public void chackLastActiveTime(String fileName, int blockIndex, long curTime, long maxFreeTime) {
-        BlockMetaData blockMetaData = metaDataMap.get(buildKey(fileName, blockIndex));
+    public void chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
+        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
         if (blockMetaData == null) {
             return;
         }
@@ -36,35 +37,35 @@ public class BlockMetaDataManager {
         }
         //封口然后放入到上传队列中
         blockMetaData.trySeal();
-        blockUpLoadQueueManager.submit(new UploadTask( fileName, blockIndex));
+        blockUpLoadQueueManager.submit(new UploadTask( fileFromOffset, blockIndex));
     }
 
     /**
      * 获取或者创建BlockMetaData
      */
-    public BlockMetaData getOrCreate(String fileName, int blockIndex) {
-        return metaDataMap.computeIfAbsent(buildKey(fileName, blockIndex), k -> new BlockMetaData());
+    public BlockMetaData getOrCreate(long fileFromOffset, int blockIndex) {
+        return metaDataMap.computeIfAbsent(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex), k -> new BlockMetaData());
     }
 
     /**
      * 获取BlockMetaData
      */
-    public BlockMetaData get(String fileName, int blockIndex) {
-        return metaDataMap.get(buildKey(fileName, blockIndex));
+    public BlockMetaData get(long fileFromOffset ,int blockIndex) {
+        return metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
     }
 
     /**
      * 删除BlockMetaData
      */
-    public void remove(String fileName, int blockIndex) {
-        metaDataMap.remove(buildKey(fileName, blockIndex));
+    public void remove(long fileFromOffset, int blockIndex) {
+        metaDataMap.remove(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
     }
 
     /**
      * 增加期待写入字节数
      */
-    public void addExpectedBytes(String fileName, int blockIndex, int bytes) {
-        BlockMetaData blockMetaData = getOrCreate(fileName, blockIndex);
+    public void addExpectedBytes(long fileFromOffset, int blockIndex, int bytes) {
+        BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
         blockMetaData.addExpectedBytes(bytes);
         blockMetaData.updateLastTime();
     }
@@ -72,72 +73,65 @@ public class BlockMetaDataManager {
     /**
      * 增加已经完成写入字节数
      */
-    public void addFinishedBytes(String fileName, int blockIndex, int bytes) {
-        get(fileName, blockIndex).addFinishedBytes(bytes);
+    public void addFinishedBytes(long fileFromOffset, int blockIndex, int bytes) {
+        get(fileFromOffset, blockIndex).addFinishedBytes(bytes);
     }
 
     /**
      * CAS封口
      */
-    public void trySeal(String fileName, int blockIndex) {
-        get(fileName, blockIndex).trySeal();
+    public void trySeal(long fileFromOffset, int blockIndex) {
+        get(fileFromOffset, blockIndex).trySeal();
     }
 
 
     /**
      * CAS改为上传中
      */
-    public void tryStartUpload(String fileName, int blockIndex) {
-        get(fileName, blockIndex).tryStartUpload();
+    public void tryStartUpload(long fileFromOffset, int blockIndex) {
+        get(fileFromOffset, blockIndex).tryStartUpload();
     }
 
 
     /**
-     * CAS改为上传完成
+     * CAS改为上传完成，也就是直接删除对应的元数据
      */
-    public void markUploadSuccess(String fileName, int blockIndex) {
-        get(fileName, blockIndex).markUploadSuccess();
+    public void markUploadSuccess(long fileFromOffset, int blockIndex) {
+        this.remove(fileFromOffset,blockIndex);
     }
 
     /**
      * CAS改为上传失败
      */
-    public void markUploadFailed(String fileName, int blockIndex) {
-        get(fileName, blockIndex).markUploadFailed();
+    public void markUploadFailed(long fileFromOffset, int blockIndex) {
+        get(fileFromOffset, blockIndex).markUploadFailed();
     }
 
     /**
      * CAS改将上传失败改为上传中
      */
-    public void retryUpload(String fileName, int blockIndex) {
-        get(fileName, blockIndex).retryUpload();
+    public void retryUpload(long fileFromOffset, int blockIndex) {
+        get(fileFromOffset, blockIndex).retryUpload();
     }
 
     /**
      * 是否已经封口
      */
-    public boolean isSealed(String fileName, int blockIndex) {
-        BlockMetaData metaData = get(fileName, blockIndex);
+    public boolean isSealed(long fileFromOffset, int blockIndex) {
+        BlockMetaData metaData = get(fileFromOffset, blockIndex);
         return metaData != null && metaData.getState() == 1;
     }
 
     /**
      * 是否已经全部写入完成，可以上传
      */
-    public boolean canUpload(String fileName, int blockIndex) {
-        BlockMetaData metaData = get(fileName, blockIndex);
+    public boolean canUpload(long fileFromOffset, int blockIndex) {
+        BlockMetaData metaData = get(fileFromOffset, blockIndex);
         if (metaData == null) {
             return false;
         }
         return metaData.getState() == 1
                 && metaData.getExpectedBytes() == metaData.getFinishedBytes();
-    }
-
-    /**
-     * 构建唯一Key
-     */
-    private String buildKey(String fileName, int blockIndex) {
-        return fileName + '_' + blockIndex;
     }
 
 }

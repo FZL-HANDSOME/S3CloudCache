@@ -9,7 +9,7 @@ public class ProjectUtilText {
     }
 
     private static void textName(){
-        String aaa = ProjectUtil.generateUniqueS3Key("order","instanceA","bucketA","00000002",1);
+        String aaa = ProjectUtil.generateUniqueS3Key("order","instanceA","bucketA",20,1);
         System.out.println(aaa);
     }
 

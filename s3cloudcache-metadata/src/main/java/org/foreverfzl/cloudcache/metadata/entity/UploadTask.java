@@ -5,20 +5,20 @@ package org.foreverfzl.cloudcache.metadata.entity;
  */
 public class UploadTask {
     //文件名字
-    private final String fileName;
+    private final long fileFromOffset;
     //block逻辑索引
     private final int logicalIndex;
 
-    public UploadTask(String fileName, int logicalIndex) {
+    public UploadTask(long fileName, int logicalIndex) {
 
-        this.fileName = fileName;
+        this.fileFromOffset = fileName;
         this.logicalIndex = logicalIndex;
     }
 
 
 
-    public String getFileName() {
-        return fileName;
+    public long getFileFromOffset() {
+        return fileFromOffset;
     }
 
     public int getLogicalIndex() {

@@ -4,6 +4,7 @@ import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.storage.instance.WriteResult;
+import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
@@ -18,7 +19,7 @@ import java.nio.ByteBuffer;
  */
 public class BucketWriterWriter extends AbstractBucketWriter {
 
-    private static final Logger log= LoggerFactory.getLogger(LogName.BUCKET_INSTANCE);
+    private static final Logger log = LoggerFactory.getLogger(LogName.BUCKET_INSTANCE);
 
     private final String bucketName;
 
@@ -26,31 +27,36 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private final CacheBlockManager cacheBlockManager;
 
-    public BucketWriterWriter(String bucketName, MappedFileManager mappedFileManager, CacheBlockManager cacheBlockManager) {
-        this.bucketName=bucketName;
+    private final S3CloudCacheInstance instance;
+
+    public BucketWriterWriter(String bucketName, MappedFileManager mappedFileManager, CacheBlockManager cacheBlockManager,S3CloudCacheInstance instance) {
+        this.bucketName = bucketName;
         this.mappedFileManager = mappedFileManager;
         this.cacheBlockManager = cacheBlockManager;
+        this.instance=instance;
     }
 
 
     @Override
     public WriteResult write(byte[] data) {
-//        try {
-//            AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
-//            if(!result.isOk()){
-//                log.warn("WAL数据添加失败，result==>{}",result);
-//            }
-////public HeapBlockDataStruct(String fileName, int blockIndex, int blockExpectedValidBytes, byte[] dataBytes, int fromOffset, int dataLen)
-//            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getFileName(),result.getLogicalIndex()
-//                    ,data,0,data.length);
-//            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
-//            if(!blockResult.result()){
-//                log.warn("Block数据添加失败，blockResult==>{}",blockResult);
-//            }
-//        } catch (Exception e) {
-//            log.error("Exception is=>",e);
-//        }
-        return null;
+        WriteResult writeResult = null;
+        try {
+            AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
+            if (!result.isOk()) {
+                log.warn("WAL数据添加失败，result==>{}", result);
+            }
+//            (long fileFromOffset, int blockIndex,byte[] dataBytes, int fromOffset, int dataLen)
+            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getFileFromOffset(), result.getLogicalIndex()
+                    , data, 0, data.length);
+            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
+            if (!blockResult.result()) {
+                log.warn("Block数据添加失败，blockResult==>{}", blockResult);
+            }
+            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size());
+        } catch (Exception e) {
+            log.error("Exception is=>", e);
+        }
+        return writeResult;
     }
 
     @Override
@@ -67,5 +73,12 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     public WriteResult write(ByteBuffer buffer, long offset, long length) {
 
         return null;
+    }
+
+    //todo关闭资源
+    public void close() {
+        mappedFileManager.close();
+        cacheBlockManager.close();
+        instance.close();
     }
 }

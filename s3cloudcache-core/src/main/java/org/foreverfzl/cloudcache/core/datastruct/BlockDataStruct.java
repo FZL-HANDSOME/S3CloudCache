@@ -9,13 +9,11 @@ public interface BlockDataStruct {
 
     boolean writeTo(MemorySegment target);
 
-    String getFileName();
+    long getFileFromOffset();
 
     int getBlockIndex();
 
     int getDataLen();
-
-    int getBlockExpectedValidBytes();
 
 
 

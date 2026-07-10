@@ -22,7 +22,7 @@ public class BucketConfig {
     /**
      * Block的大小，默认为8MB
      */
-    public Integer blockSize = BlockSizeLevel.MEDIUM.getBytes();
+    public Integer blockSize = BlockSizeLevel.SMALL.getBytes();
 
     /**
      * Block并发上传大小，默认为8个
@@ -45,13 +45,18 @@ public class BucketConfig {
      */
     public Boolean isLockMappedFilePageCache = false;
 
+    /**
+     * 缓存上传后是否进行一次headObject校验，如果为true会增加一次网络请求。
+     */
+    public Boolean enableHeadCheck=false;
+
 
     public BucketConfig() {
 
     }
 
     public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount, Long pageFlushLevel,
-                        Boolean isWarmWalFile, Boolean isLockMappedFilePageCache) {
+                        Boolean isWarmWalFile, Boolean isLockMappedFilePageCache,Boolean enableHeadCheck) {
         this.s3KeyPrefix = s3KeyPrefix;
         this.walFileSize = walFileSize;
         this.cacheSize = cacheSize;
@@ -60,6 +65,7 @@ public class BucketConfig {
         this.pageFlushLevel = pageFlushLevel;
         this.isWarmWalFile = isWarmWalFile;
         this.isLockMappedFilePageCache = isLockMappedFilePageCache;
+        this.enableHeadCheck=enableHeadCheck;
     }
 
     public BucketConfig setS3KeyPrefix(String s3KeyPrefix) {
@@ -93,14 +99,17 @@ public class BucketConfig {
     }
 
     public BucketConfig setWarmWalFile(Boolean warmWalFile) {
-        isWarmWalFile = warmWalFile;
+        this.isWarmWalFile = warmWalFile;
         return this;
     }
 
     public BucketConfig setLockMappedFilePageCache(Boolean lockMappedFilePageCache) {
-        isLockMappedFilePageCache = lockMappedFilePageCache;
+        this.isLockMappedFilePageCache = lockMappedFilePageCache;
         return this;
     }
 
-
+    public BucketConfig setEnableHeadCheck(Boolean enableHeadCheck) {
+        this.enableHeadCheck = enableHeadCheck;
+        return this;
+    }
 }

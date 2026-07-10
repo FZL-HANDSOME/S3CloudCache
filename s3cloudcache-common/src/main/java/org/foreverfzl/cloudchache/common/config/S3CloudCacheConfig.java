@@ -53,7 +53,6 @@ public class S3CloudCacheConfig {
      */
     public Map<String, BucketConfig> specialBuckets = new HashMap<>();
 
-
     public S3CloudCacheConfig(String instanceName, String walPath, BucketConfig defaultBucketConfig) {
         this.instanceName = instanceName;
         this.walPath = walPath;
@@ -86,7 +85,6 @@ public class S3CloudCacheConfig {
         specialBuckets.put(bucketName,config);
         return this;
     }
-
 
 }
 

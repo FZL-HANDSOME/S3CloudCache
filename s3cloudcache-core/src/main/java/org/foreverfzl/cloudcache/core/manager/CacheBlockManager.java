@@ -34,8 +34,10 @@ public class CacheBlockManager {
     // 空闲/干净的 CloudCacheBlock 池
     private final BlockingQueue<CloudCacheBlock> freeBlocks;
 
-    // 根据自定义 key 维护的 K-V 映射，key为fileName+_+BlockIndex
-    private final ConcurrentHashMap<String, CloudCacheBlock> keyBlockMap;
+    // 根据自定义 key 维护的 K-V 映射，key为fileFromOffset+NameBlockIndex
+    private final ConcurrentHashMap<Long, CloudCacheBlock> keyBlockMap;
+    //1024个锁分片，防止fileFromOffset+NameBlockIndex一个组合获取多个Block
+    private final Object[] blockLocks = new Object[256];
 
     //block上传者
     private final CacheBlockUpdater blockUpdater;
@@ -50,7 +52,7 @@ public class CacheBlockManager {
     private volatile boolean activeQueueTaskThread = true;
     private final Thread getBlockUpLoadQueueTaskThread;
 
-    public CacheBlockManager(String instanceName, String bucketName, S3Client s3Client, BucketConfig config) {
+    public CacheBlockManager(String instanceName, String bucketName,BlockMetaDataManager blockMetaDataManager,S3Client s3Client, BucketConfig config) {
         this.config = config;
         this.blockCount = (int) (config.cacheSize / config.blockSize);
         this.instanceName = instanceName;
@@ -60,15 +62,18 @@ public class CacheBlockManager {
         this.globalMemorySegment = arena.allocate(config.cacheSize);
         this.freeBlocks = new ArrayBlockingQueue<>(blockCount);
         this.keyBlockMap = new ConcurrentHashMap<>();
-        blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client);
-        this.blockMetaDataManager = new BlockMetaDataManager();
+        this.blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client,config.enableHeadCheck);
+        this.blockMetaDataManager = blockMetaDataManager;
         this.blockUpLoadQueueManager = blockMetaDataManager.blockUpLoadQueueManager;
-        getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
+        this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
             long offset = (long) i * config.blockSize;
             CloudCacheBlock block = new CloudCacheBlock(offset, config.blockSize, globalMemorySegment.asSlice(offset, config.blockSize), this);
             freeBlocks.add(block);
+        }
+        for (int i = 0; i < blockLocks.length; i++) {
+            blockLocks[i] = new Object();
         }
         getBlockUpLoadQueueTaskThread.start();
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
@@ -80,7 +85,7 @@ public class CacheBlockManager {
         while (activeQueueTaskThread){
             try {
                 UploadTask task = blockUpLoadQueueManager.take();
-                CloudCacheBlock cacheBlock = keyBlockMap.get(buildBlockKey(task.getFileName(), task.getLogicalIndex()));
+                CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(task.getFileFromOffset(), task.getLogicalIndex()));
                 if(cacheBlock==null){
                     return;
                 }
@@ -104,7 +109,7 @@ public class CacheBlockManager {
         int size = 0;
         try {
             size = dataStruct.getDataLen();
-            cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
+            cacheBlock = getBlock(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
@@ -112,7 +117,7 @@ public class CacheBlockManager {
             //将数据写入Block
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (isSuccess) {
-                blockMetaDataManager.addFinishedBytes(dataStruct.getFileName(), dataStruct.getBlockIndex(), size);
+                blockMetaDataManager.addFinishedBytes(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex(), size);
             }
         } catch (Exception e) {
             return AppendDataResult.fail(curWritePosition, size);
@@ -133,11 +138,14 @@ public class CacheBlockManager {
     public AppendDataResult failToReAppendData(BlockDataStruct dataStruct, long fromOffset, int size) {
         CloudCacheBlock cacheBlock = null;
         try {
-            cacheBlock = getBlock(dataStruct.getFileName(), dataStruct.getBlockIndex());
+            cacheBlock = getBlock(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex());
             cacheBlock.getReference();
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(fromOffset, size);
             //将数据写入Block
-            dataStruct.writeTo(cacheBlockSegment);
+            boolean isSuccess=dataStruct.writeTo(cacheBlockSegment);
+            if (isSuccess) {
+                blockMetaDataManager.addFinishedBytes(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex(), size);
+            }
         } catch (Exception e) {
             return AppendDataResult.fail(fromOffset, size);
         } finally {
@@ -159,14 +167,14 @@ public class CacheBlockManager {
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
-    private CloudCacheBlock getBlock(String fileName, int blockIndex) throws InterruptedException {
-        String cacheBlockKey = buildBlockKey(fileName,blockIndex);
+    private CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
+        long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset,blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
         if (existingBlock != null) {
             return existingBlock;
         }
-        synchronized (cacheBlockKey.intern()) {
+        synchronized (getLock(cacheBlockKey)) {
             // 双重检查
             existingBlock = keyBlockMap.get(cacheBlockKey);
             if (existingBlock != null) {
@@ -174,8 +182,8 @@ public class CacheBlockManager {
             }
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
-            block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileName, blockIndex));
-            block.setFileName(fileName);
+            block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
+            block.setFileFromOffset(fileFromOffset);
             block.setLogicalIndex(blockIndex);
             keyBlockMap.put(cacheBlockKey, block);
             return block;
@@ -190,7 +198,7 @@ public class CacheBlockManager {
             return;
         }
         // 2. 从 K-V 映射中移除
-        String key = buildBlockKey(block.getFileName(),block.getLogicalIndex());
+        long key = ProjectUtil.buildBlockKey(block.getFileFromOffset(),block.getLogicalIndex());
         keyBlockMap.remove(key);
         // 3. 清理 Block 的属性
         block.clean();
@@ -198,9 +206,10 @@ public class CacheBlockManager {
         freeBlocks.put(block);
     }
 
-    private String buildBlockKey(String fileName,int blockIndex){
-        return fileName+"_"+blockIndex;
+    private Object getLock(long key) {
+        return blockLocks[(int)(key & 255)];
     }
+
 
 
     //todo

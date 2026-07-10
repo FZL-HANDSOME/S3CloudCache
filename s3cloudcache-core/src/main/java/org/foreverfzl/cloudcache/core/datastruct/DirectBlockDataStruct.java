@@ -8,17 +8,15 @@ import java.lang.foreign.ValueLayout;
  */
 public class DirectBlockDataStruct implements BlockDataStruct{
 
-    private final String fileName;
+    private final long fileFromOffset;
     private final int blockIndex;
-    private final int blockExpectedValidBytes;
     private final int fromOffset;
     private final int dataLen;
     private final MemorySegment dataSegment;
 
-    public DirectBlockDataStruct(String fileName, int blockIndex, int blockExpectedValidBytes, int fromOffset, int dataLen, MemorySegment dataSegment) {
-        this.fileName = fileName;
+    public DirectBlockDataStruct(long fileFromOffset, int blockIndex, int fromOffset, int dataLen, MemorySegment dataSegment) {
+        this.fileFromOffset = fileFromOffset;
         this.blockIndex = blockIndex;
-        this.blockExpectedValidBytes = blockExpectedValidBytes;
         this.fromOffset = fromOffset;
         this.dataLen = dataLen;
         this.dataSegment = dataSegment;
@@ -42,9 +40,10 @@ public class DirectBlockDataStruct implements BlockDataStruct{
     }
 
     @Override
-    public String getFileName() {
-        return fileName;
+    public long getFileFromOffset() {
+        return fileFromOffset;
     }
+
 
     @Override
     public int getBlockIndex() {
@@ -56,7 +55,4 @@ public class DirectBlockDataStruct implements BlockDataStruct{
         return dataLen;
     }
 
-    public int getBlockExpectedValidBytes() {
-        return blockExpectedValidBytes;
-    }
 }

@@ -14,14 +14,15 @@ public class BlockMetaData {
     //              │
     //              ▼
     //      UPLOADING(2)
-    //         │         │
-    //         ▼         ▼
+    //         │     │  ▲
+    //         ▼     ▼  │
     //SUCCESS(3)   FAILED(4)
     public static final int OPEN = 0;
     public static final int SEALED = 1;
     public static final int UPLOADING = 2;
     public static final int SUCCESS = 3;
     public static final int FAILED = 4;
+
     private static final AtomicIntegerFieldUpdater<BlockMetaData> STATE_UPDATER;
     private volatile int state;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> EXPECTED_BYTES_UPDATER;

@@ -24,7 +24,7 @@ public final class ProjectUtil {
     //用户目录
     public static final String USER_HOME = System.getProperty("user.home");
     public static final String WAL_FILE_ADDRESS = File.separator + "CloudCache" + File.separator + "store";
-    public static final String PREFIX_FILE_NAME="prefix";
+    public static final String PREFIX_FILE_NAME = "prefix";
 
     public static final Unsafe UNSAFE;
     //操作系统页大小
@@ -190,14 +190,14 @@ public final class ProjectUtil {
      * @return 最终的 S3 物理对象键路径 ({用户自定义前缀}/)
      */
     public static String generateUniqueS3Key(final String userPrefix, final String instanceName, final String bucketName,
-                                             final String fileName, int blockIndex) {
+                                             final long fileFromOffset, int blockIndex) {
         String uniqueContent = MACHINE_ID
                 + "_"
                 + instanceName
                 + "_"
                 + bucketName
                 + "_"
-                + fileName
+                + fileFromOffset
                 + "_"
                 + blockIndex;
         int hash = uniqueContent.hashCode() & 0xFFFFFF;
@@ -211,7 +211,7 @@ public final class ProjectUtil {
                 + "_"
                 + bucketName
                 + "_"
-                + fileName
+                + fileFromOffset
                 + "_"
                 + blockIndex
                 + ".block";
@@ -219,6 +219,7 @@ public final class ProjectUtil {
 
     /**
      * 除法：num1 / num2，位运算实现
+     *
      * @param num1 被除数 非负
      * @param num2 除数，必须是2的整数次幂
      * @return 整除结果
@@ -227,6 +228,42 @@ public final class ProjectUtil {
         // 获取2的幂次，即右移位数
         int shiftBits = Integer.numberOfTrailingZeros(num2);
         return num1 >> shiftBits;
+    }
+
+
+    /**
+     * blockIndex 使用 8 bit（0~255）
+     */
+    private static final int BLOCK_INDEX_BITS = 8;
+
+    /**
+     * blockIndex 掩码
+     */
+    private static final long BLOCK_INDEX_MASK = (1L << BLOCK_INDEX_BITS) - 1;
+
+    /**
+     * 生成唯一 BlockKey
+     *
+     * @param fileFromOffset WAL 文件起始 Offset（即 fileName）
+     * @param blockIndex     Block 编号（0~255）
+     * @return 唯一 BlockKey
+     */
+    public static long buildBlockKey(long fileFromOffset, int blockIndex) {
+        return (fileFromOffset << BLOCK_INDEX_BITS) | (blockIndex & BLOCK_INDEX_MASK);
+    }
+
+    /**
+     * 获取 fileFromOffset
+     */
+    public static long parseFileFromOffset(long blockKey) {
+        return blockKey >>> BLOCK_INDEX_BITS;
+    }
+
+    /**
+     * 获取 blockIndex
+     */
+    public static int parseBlockIndex(long blockKey) {
+        return (int) (blockKey & BLOCK_INDEX_MASK);
     }
 
 
