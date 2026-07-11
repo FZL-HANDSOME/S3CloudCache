@@ -53,6 +53,8 @@ public class CacheBlockUpdater {
                 long fileFromOffset = block.getFileFromOffset();
                 int logicalIndex = block.getLogicalIndex();
                 manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex);
+                log.info("BLOCK=====>上传的S3key={}，文件={}，逻辑索引={}，上传长度{}",
+                        block.getS3Key(),block.getBlockFromOffset(),block.getLogicalIndex(),block.getWritePosition());
                 // 执行重度网络 I/O
                 boolean isSuccess = executeUpload(block);
                 if (isSuccess) {
@@ -60,6 +62,7 @@ public class CacheBlockUpdater {
                     manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
                     // 成功后归还内存
                     manager.recycleBlock(block);
+                    log.info("上传成功");
                 } else {
                     log.warn("instance={},bucket={}:Failed to upload this block=>{}", manager.instanceName, manager.bucketName, block);
                     handleUploadFailure(block);

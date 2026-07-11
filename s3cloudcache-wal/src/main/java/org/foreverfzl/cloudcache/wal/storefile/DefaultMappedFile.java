@@ -373,6 +373,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //增加对应Block的期望字节数
             result.setLogicalIndex(logicalIndex);
             manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataStruct.getDataLen());
+            log.info("WAL======>文件={}，block逻辑索引={}，写入数据长度={}",this.fileFromOffset,logicalIndex,
+                    dataStruct.getDataLen());
         }
         return result;
     }

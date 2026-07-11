@@ -48,7 +48,7 @@ public class WalInstanceBucketManager {
         for (int i = 0; i < LOCKS_COUNT; i++) {
             locks[i] = new ReentrantLock();
         }
-        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 15, 15, TimeUnit.SECONDS);
+        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 15, TimeUnit.SECONDS);
     }
 
     private void checkBlockMeta() {

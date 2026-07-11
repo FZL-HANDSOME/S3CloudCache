@@ -118,6 +118,8 @@ public class CacheBlockManager {
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (isSuccess) {
                 blockMetaDataManager.addFinishedBytes(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex(), size);
+                log.info("CORE======>文件={}，block逻辑索引={}，写入数据长度={}",dataStruct.getFileFromOffset(),dataStruct.getBlockIndex(),
+                        dataStruct.getDataLen());
             }
         } catch (Exception e) {
             return AppendDataResult.fail(curWritePosition, size);

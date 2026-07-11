@@ -45,7 +45,6 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             if (!result.isOk()) {
                 log.warn("WAL数据添加失败，result==>{}", result);
             }
-//            (long fileFromOffset, int blockIndex,byte[] dataBytes, int fromOffset, int dataLen)
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getFileFromOffset(), result.getLogicalIndex()
                     , data, 0, data.length);
             AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);

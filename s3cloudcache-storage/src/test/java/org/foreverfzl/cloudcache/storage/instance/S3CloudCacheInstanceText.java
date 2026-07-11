@@ -50,7 +50,7 @@ public class S3CloudCacheInstanceText {
         //===========================
 
         int threadCount = 80;
-        int writeCountPerThread = 1967;
+        int writeCountPerThread = 512;
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CountDownLatch latch = new CountDownLatch(threadCount);
         long start = System.currentTimeMillis();
@@ -59,7 +59,8 @@ public class S3CloudCacheInstanceText {
             executor.submit(() -> {
                 try {
                     for (int j = 0; j < writeCountPerThread; j++) {
-                        String value = "2026-07-01 15:30:22.156 INFO [thread-0005] ForeverCloudCache - data_id:000089 | msg:thread-0005_data-000089_ForeverCloudCache | traceId:9f2e78d103ac4211" + threadId + "_" + j;
+//                        String value = "2026-07-01 15:30:22.156 INFO [thread-0005] ForeverCloudCache - data_id:000089 | msg:thread-0005_data-000089_ForeverCloudCache | traceId:9f2e78d103ac4211" + threadId + "_" + j;
+                        String value="2026-07-11 16:42:18.726 INFO [WAL-PRESS-THREAD-0047] c.foreverfzl.cloudcache.wal.BlockUploadManager - traceId=73ac92f0d1e64489b21d56ce29f1765e,dataId=001256,blockKey=65892104572164,threadId=47,seq=1295 | upload minio object success, bucket=cn-local-wal,objectKey=wal/00000000000000001024/47,blockSize=536byte,useTime=18ms,enableHeadCheck=true | msg=wal block async upload finished, cache meta updated, pending flush count=32,current memory hold bytes=12582912,free os memory=2145896448";
                         WriteResult result = textBucket.write(value.getBytes(StandardCharsets.UTF_8));
                     }
                 } catch (Exception e) {
@@ -87,7 +88,6 @@ public class S3CloudCacheInstanceText {
         }
         executor.shutdown();
         textBucket.close();
-
 
     }
 
