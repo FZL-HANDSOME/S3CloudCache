@@ -55,6 +55,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected Arena arena;
     protected MemorySegment mappedMemorySegment; //本质是MMP内存映射
 
+    //每个文件开头元数据区域大小
+    public static final long FILE_META_SIZE = 4 * 1024;
+
     //Block、upLoadPosition更新相关
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
     protected int blockSize;
@@ -62,6 +65,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected AtomicInteger nextUploadBlockIndex = new AtomicInteger(0); //upLoadPosition指针期望下次更新index
     //引入数组元素的 VarHandle，用于消灭原生数组的内存可见性缺陷
     private static final VarHandle ARRAY_ELEMENT_HANDLE;
+    //如果该文件的指针更新了该属性会被设置为true，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为false;
+    public volatile boolean metaDirty;
 
 
     static {
@@ -83,6 +88,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.blockSize = blockSize;
         this.file = file;
         this.manager = manager;
+        this.metaDirty = false;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         blockEndOffsetInMappedFile = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
@@ -143,47 +149,19 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     /**
-     * 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针
+     * 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针，该方法只是将预期结果填到坑里面，有专门的线程去检查指针
      *
-     * @param logicalIndex    当前完成上传的 Block 在本文件内部的逻辑序号 (0, 1, 2...)
-     * @param endOffsetInFile 当前 Block 在文件内部的绝对结束位点 (如 8192, 16384...)
+     * @param logicalIndex 当前完成上传的 Block 在本文件内部的逻辑序号 (0, 1, 2...)
      */
-    public void ackUpLoadPosition(int logicalIndex, long endOffsetInFile) {
+    public void ackUpLoadPosition(int logicalIndex) {
         // 边界防御：防止脏数据引发数组越界
         if (logicalIndex < 0 || logicalIndex >= totalBlockCount) {
             log.error("Invalid logical index: {}, totalBlockCount: {}", logicalIndex, totalBlockCount);
             return;
         }
         // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
-        ARRAY_ELEMENT_HANDLE.setVolatile(this.blockEndOffsetInMappedFile, logicalIndex, endOffsetInFile);
-        // 2. 级联推进滑窗：尝试多线程无锁并发检查并更新连续下标
-        int currIndex;
-        // 顺着多米诺骨牌的期望线一路向右检查
-        while ((currIndex = nextUploadBlockIndex.get()) < totalBlockCount) {
-            // 3. 利用 VarHandle 的 Volatile 语义读取，防止因缓存延迟读到旧值 0
-            long nextOffset = (long) ARRAY_ELEMENT_HANDLE.getVolatile(this.blockEndOffsetInMappedFile, currIndex);
-            if (nextOffset == 0) {
-                // 核心卡点：当前大盘正在死等的那块骨牌还没传完，滑窗卡住，直接退出
-                break;
-            }
-            // 4. 抢夺骨牌推进权：谁能把期望指针从 currIndex 顶到 currIndex + 1，谁就接管了这一档的推进权
-            if (nextUploadBlockIndex.compareAndSet(currIndex, currIndex + 1)) {
-                // 5. 守护连续性：通过 CAS 自旋把大盘位点顶高到 nextOffset
-                long currentPos;
-                while ((currentPos = UPLOAD_POSITION_UPDATER.get(this)) < nextOffset) {
-                    // 如果大盘位点已经被速度更快的级联线程推得更高了，当前线程的 CAS 就会失败并顺势退出
-                    if (UPLOAD_POSITION_UPDATER.compareAndSet(this, currentPos, nextOffset)) {
-                        break;
-                    }
-                }
-                // 抢到权的线程不能歇着，继续进入下一次 while 循环，检查下一颗骨牌是不是早就被别的网络线程填好了
-            } else {
-                // CAS 失败说明别的线程手快，已经把期望指针推上去了，当前线程继续自旋跟进
-                Thread.onSpinWait(); // 提示 CPU 此时线程处于自旋等待状态，可以适当降低消耗进行优化
-            }
-        }
+        ARRAY_ELEMENT_HANDLE.setVolatile(this.blockEndOffsetInMappedFile, logicalIndex, (long) (logicalIndex + 1) * blockSize);
     }
-
 
     /**
      * 预热 PageCache 并且根据用户配置判断是否锁定映射内存，锁定可以确保其不会被换出到虚拟内存中，也不会被操作系统移动。
@@ -302,12 +280,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final DataStruct dataStruct) {
-        if (!isAvailable()) return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
-        // 1. 参数校验
-        if (dataStruct == null) {
-            log.warn("appendData: walDataStruct cannot be null, fileName={}", fileName);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileFromOffset);
-        }
+        if (!isAvailable())
+            return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
@@ -368,12 +342,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
             manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
         }
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
-        AppendMessageResult result = doAppend(currentPos, msgSize, dataStruct);
+        //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
+        AppendMessageResult result = doAppend(FILE_META_SIZE + currentPos, msgSize, dataStruct);
         if (result.isOk()) {
+            this.metaDirty = true;
             //增加对应Block的期望字节数
             result.setLogicalIndex(logicalIndex);
             manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataStruct.getDataLen());
-            log.info("WAL======>文件={}，block逻辑索引={}，写入数据长度={}",this.fileFromOffset,logicalIndex,
+            log.info("WAL======>文件={}，block逻辑索引={}，写入数据长度={}", this.fileFromOffset, logicalIndex,
                     dataStruct.getDataLen());
         }
         return result;
@@ -448,6 +424,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public MemorySegment getMappedMemorySegment() {
         return mappedMemorySegment;
+    }
+
+    //返回true则代表还会继续更新upLoad指针
+    public boolean isContinueUpdateUpLoadPosition() {
+        return nextUploadBlockIndex.get() != totalBlockCount;
     }
 
 }

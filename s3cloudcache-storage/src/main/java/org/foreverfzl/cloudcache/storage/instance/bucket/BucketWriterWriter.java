@@ -53,7 +53,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             }
             writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size());
         } catch (Exception e) {
-            log.error("Exception is=>", e);
+            log.error("BucketWriterWriter write Exception is=>", e);
         }
         return writeResult;
     }

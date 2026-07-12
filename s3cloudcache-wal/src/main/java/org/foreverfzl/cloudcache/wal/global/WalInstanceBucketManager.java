@@ -72,7 +72,7 @@ public class WalInstanceBucketManager {
                 blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
             }
         } catch (Exception e) {
-            log.warn("checkBlockMeta Task Failed");
+            log.warn("checkBlockMeta Task Failed",e);
         }
     }
 

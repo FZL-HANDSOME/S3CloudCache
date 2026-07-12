@@ -15,7 +15,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Map;
@@ -34,14 +34,20 @@ public class MappedFileManager {
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
 
-    //该instance下所有的mappedFile的全局read指针，该指针之前的数据全部安全
-    private volatile long globalReadPosition;
-    //刷新所有文件的读指针
-    private final Thread flushReadPositionThread;
-    //检查所有的文件，控制文件是否要删除
+    //所有文件的上传指针
+    private final int flushFileUpLoadPositonTime;
+    //该线程就是刷新所有文件的上传指针
+    private final Thread flushFileUpLoadPositionThread;
+    //该instance下所有的mappedFile的全局上传指针，该指针之前的数据全上传到云上，该指针之前的文件可以删除
+    private volatile long globalUpLoadPosition;
+    //当前上传指针更新到的最后一个文件
+    private final AtomicReference<DefaultMappedFile> upLoadActiveMappedFile = new AtomicReference<>();
+
+    //检查所有的文件，控制文件是否要删除，把globalUpLoadPosition指针之前的文件全部删除，因为前面的文件已经上传到服务了
     private final Thread chackMappedFileThread;
     //当前活跃文件的最后一个文件
     private final AtomicReference<DefaultMappedFile> activeMappedFile = new AtomicReference<>();
+
     //主要控制线程flushReadPosition、chackMappedFile等的执行
     private volatile boolean active = true;
     //该bucket的wal目录绝对地址
@@ -65,6 +71,10 @@ public class MappedFileManager {
     //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
 
+    private final int flushFileMetaTime;
+    //刷新文件元数据的线程，将文件的各个信息写入到对应文件的开头4KB
+    private Thread fileMetaFlushThread;
+
 
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
         this.instanceName = instanceName;
@@ -74,28 +84,24 @@ public class MappedFileManager {
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
-        saveBucketMeta(new MetaInfo(config.s3KeyPrefix));//保存该bucket的元数据
-        flushReadPositionThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                flushReadPositionTask();
-            }
-        });
-        chackMappedFileThread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                chackMappedFileTask();
-            }
-        });
+        this.saveBucketMeta(new MetaInfo(config.s3KeyPrefix));//保存该bucket的元数据
+        this.flushFileMetaTime = config.flushFileMetaInfoTime;
+        this.flushFileUpLoadPositonTime = config.flushFileUpLoadPositionTime;
+        this.flushFileUpLoadPositionThread = new Thread(this::flushUpLoadPositionTask);
+        this.chackMappedFileThread = new Thread(this::chackMappedFileTask);
+        this.fileMetaFlushThread = new Thread(this::flushFileMeta);
         init();
     }
 
+    //启动线程，创建初始文件等
     private void init() {
-//        flushReadPositionThread.start();
+//        flushFileUpLoadPositionThread.start();
 //        chackMappedFileThread.start();
+//        fileMetaFlushThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
         synCreateMappedFile(0L);
         activeMappedFile.compareAndSet(null, mappedFiles.get(0L));
+        upLoadActiveMappedFile.compareAndSet(null, mappedFiles.get(0L));
     }
 
     //todo 将数据添加到指定文件，如果文件满了则获取新的文件进行写，如果是其它错误则分情况而论
@@ -167,92 +173,78 @@ public class MappedFileManager {
         }
     }
 
-    private void flushReadPositionTask() {
+    //刷新全局文件的上传指针
+    private void flushUpLoadPositionTask() {
         try {
             while (active) {
-                //利用 floorEntry 解决绝对位点路由问题，
-                //todo 这里可以用activeMappedFile优化，不优化也可以，时间复杂度为logn，但是数据量少可以忽略
-                Map.Entry<Long, DefaultMappedFile> entry = mappedFiles.floorEntry(globalReadPosition);
-                if (entry == null) {
+                DefaultMappedFile mappedFile = upLoadActiveMappedFile.get();
+                if (mappedFile == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
-                    log.warn("flushReadPositionTask failed: can not find `{}` DefaultMappedFile Object", globalReadPosition);
-                    Thread.sleep(config.pageFlushLevel);
+                    log.warn("flushUpLoadPositionTask failed: can not find DefaultMappedFile Object");
+                    Thread.sleep(flushFileUpLoadPositonTime);
                     continue;
                 }
-                DefaultMappedFile mappedFile = entry.getValue();
-                long readPosition = mappedFile.readPosition;
-                long wrotePosition = mappedFile.wrotePosition;
-                if (readPosition != wrotePosition) {
-                    //读取文件数据，检查数据是否正常，正常则force()更新readPosition
-                    long size = wrotePosition - readPosition;
-                    MemorySegment targetSegment = mappedFile.getMappedMemorySegment().asSlice(readPosition, size);
-                    //强制刷盘
-                    targetSegment.force();
-                    //刷盘成功更新指针
-                    mappedFile.readPosition = wrotePosition;
-                    globalReadPosition += size;
+                long curUpLoadPosition = mappedFile.upLoadPosition + mappedFile.fileFromOffset;
+                if (curUpLoadPosition != globalUpLoadPosition) {
+                    //如果不相等则更新
+                    globalUpLoadPosition = curUpLoadPosition;
                 } else {
-                    //readPosition == wrotePosition也有可能文件不能写入了
-                    //不能写入原因之一 就是一条数据添加到文件中发现位置不够，因此将本文件设置为不可写入，然后用新的文件写入
-                    if (!mappedFile.isAvailable()) {
-                        globalReadPosition = mappedFile.fileFromOffset + mappedFile.fileSize;
+                    //相等看看该文件是否还有可能更新上传指针
+                    if (!mappedFile.isContinueUpdateUpLoadPosition()) {
+                        Map.Entry<Long, DefaultMappedFile> next = mappedFiles.higherEntry(mappedFile.fileFromOffset);
+                        if (next != null) {
+                            globalUpLoadPosition = next.getKey();
+                        }
                     }
                 }
-                Thread.sleep(config.pageFlushLevel);
+                Thread.sleep(flushFileUpLoadPositonTime);
             }
         } catch (Exception e) {
             log.error(e.getMessage());
+            Thread.currentThread().interrupt();
         }
     }
 
     //保存该bucket的元数据
     private void saveBucketMeta(MetaInfo metaInfo) {
-        Path path = Path.of(META_FILE_NAME);
+        Path metaPath = Path.of(dirPath, META_FILE_NAME);
         try (Arena arena = Arena.ofConfined();
              FileChannel fileChannel = FileChannel.open(
-                     path,
+                     metaPath,
                      StandardOpenOption.CREATE,
                      StandardOpenOption.READ,
                      StandardOpenOption.WRITE,
                      StandardOpenOption.TRUNCATE_EXISTING)) {
-
+            // 创建父目录
+            Files.createDirectories(metaPath.getParent());
+            // 固定文件大小
             fileChannel.truncate(META_FILE_SIZE);
-
             MemorySegment segment = fileChannel.map(
                     FileChannel.MapMode.READ_WRITE,
                     0,
                     META_FILE_SIZE,
                     arena
             );
-
             long pos = 0;
-
-            // Magic
-            segment.set(ValueLayout.JAVA_INT_UNALIGNED, pos, MetaInfo.MAGIC);
-            pos += Integer.BYTES;
-
-            // crc
+            // CRC
             segment.set(ValueLayout.JAVA_INT_UNALIGNED, pos, metaInfo.getCrc());
             pos += Integer.BYTES;
-
             // dataLen
             segment.set(ValueLayout.JAVA_INT_UNALIGNED, pos, metaInfo.getDataLen());
             pos += Integer.BYTES;
-
-            //data
-            byte[] prefixBytes = metaInfo.getData();
+            // data
             MemorySegment.copy(
-                    prefixBytes,
+                    metaInfo.getData(),
                     0,
                     segment,
                     ValueLayout.JAVA_BYTE,
                     pos,
-                    prefixBytes.length
+                    metaInfo.getDataLen()
             );
             // 强制刷盘
             segment.force();
         } catch (Exception e) {
-            log.warn("bucket meta file create failed");
+            log.warn("saveBucketMeta method failed,create bucketMeta failed", e);
         }
     }
 
@@ -260,6 +252,50 @@ public class MappedFileManager {
     //检查WAL文件的生命周期
     private void chackMappedFileTask() {
 
+    }
+
+
+    private void flushFileMeta() {
+        while (active) {
+            // Iterate over all mapped files and persist their meta information to the first 4KB region.
+            // The meta region layout (little‑endian, unaligned) is:
+            // offset 0  : readPosition   (long)
+            // offset 8  : uploadPosition (long)
+            // offset 16 : createTime     (long)
+            // offset 24 : CRC32 of the three longs (int)
+            // The remaining bytes are left untouched.
+            for (Map.Entry<Long, DefaultMappedFile> entry : mappedFiles.entrySet()) {
+                DefaultMappedFile mappedFile = entry.getValue();
+                if (!mappedFile.metaDirty) {
+                    //如果不是脏数据则直接跳过
+                    continue;
+                }
+                try {
+                    long readPos = mappedFile.readPosition;
+                    long uploadPos = mappedFile.upLoadPosition;
+                    // Use file creation time if needed; fall back to current time.
+                    long updateTime = System.currentTimeMillis();
+                    // Write into the first 4KB of the mapped file.
+                    MemorySegment metaSegment = mappedFile.getMappedMemorySegment().asSlice(0, DefaultMappedFile.FILE_META_SIZE);
+                    long pos = 0;
+                    metaSegment.set(ValueLayout.JAVA_LONG, pos, readPos);
+                    pos += Long.BYTES;
+                    metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
+                    pos += Long.BYTES;
+                    metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
+                    // Ensure durability.
+                    metaSegment.force();
+                } catch (Exception e) {
+                    log.warn("flushFileMeta: failed to write meta for {}file offset ", mappedFile.getFileName(), e);
+                }
+            }
+            try {
+                Thread.sleep(flushFileMetaTime);
+            } catch (Exception e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
     }
 
     public AtomicReference<DefaultMappedFile> getActiveMappedFile() {

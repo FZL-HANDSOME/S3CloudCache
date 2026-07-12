@@ -31,11 +31,6 @@ public class BucketConfig {
 
 
     /**
-     * Page刷盘级别
-     */
-    public Long pageFlushLevel = PageFlushLevel.FAST_10_MS.getFlushIntervalMs();
-
-    /**
      * 是否预热WAL文件
      */
     public Boolean isWarmWalFile = true;
@@ -48,24 +43,31 @@ public class BucketConfig {
     /**
      * 缓存上传后是否进行一次headObject校验，如果为true会增加一次网络请求。
      */
-    public Boolean enableHeadCheck=false;
+    public Boolean enableHeadCheck = false;
+
+    /**
+     * 将文件的元数据写入到文件开头，数据恢复是方便，默认为5s，时间长了刷新慢，如果宕机恢复数据可能变多，如果时间太短了性能会下降
+     */
+    public Integer flushFileMetaInfoTime = 5000;
+    /**
+     * 每个对应一个上传指针，该时间就是刷新文件指针的时间，默认1s
+     */
+    public Integer flushFileUpLoadPositionTime = 1000;
 
 
     public BucketConfig() {
 
     }
 
-    public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount, Long pageFlushLevel,
-                        Boolean isWarmWalFile, Boolean isLockMappedFilePageCache,Boolean enableHeadCheck) {
+    public BucketConfig(String s3KeyPrefix, Long walFileSize, Long cacheSize, Integer blockSize, Integer blockUpLoadCount,
+                        Boolean isWarmWalFile, Boolean isLockMappedFilePageCache) {
         this.s3KeyPrefix = s3KeyPrefix;
         this.walFileSize = walFileSize;
         this.cacheSize = cacheSize;
         this.blockSize = blockSize;
         this.blockUpLoadCount = blockUpLoadCount;
-        this.pageFlushLevel = pageFlushLevel;
         this.isWarmWalFile = isWarmWalFile;
         this.isLockMappedFilePageCache = isLockMappedFilePageCache;
-        this.enableHeadCheck=enableHeadCheck;
     }
 
     public BucketConfig setS3KeyPrefix(String s3KeyPrefix) {
@@ -93,11 +95,6 @@ public class BucketConfig {
         return this;
     }
 
-    public BucketConfig setPageFlushLevel(Long pageFlushLevel) {
-        this.pageFlushLevel = pageFlushLevel;
-        return this;
-    }
-
     public BucketConfig setWarmWalFile(Boolean warmWalFile) {
         this.isWarmWalFile = warmWalFile;
         return this;
@@ -110,6 +107,16 @@ public class BucketConfig {
 
     public BucketConfig setEnableHeadCheck(Boolean enableHeadCheck) {
         this.enableHeadCheck = enableHeadCheck;
+        return this;
+    }
+
+    public BucketConfig setFlushFileMetaInfoTime(Integer flushFileMetaInfoTime) {
+        this.flushFileMetaInfoTime = flushFileMetaInfoTime;
+        return this;
+    }
+
+    public BucketConfig setFlushFileUpLoadPositionTime(Integer flushFileUpLoadPositionTime) {
+        this.flushFileUpLoadPositionTime = flushFileUpLoadPositionTime;
         return this;
     }
 }

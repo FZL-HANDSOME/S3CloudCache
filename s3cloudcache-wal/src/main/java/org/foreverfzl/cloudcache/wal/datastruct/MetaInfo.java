@@ -1,16 +1,12 @@
 package org.foreverfzl.cloudcache.wal.datastruct;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.zip.CRC32;
 
 /**
- * 一个Bucket对应的元数据
+ * 一个Bucket对应的元数据 文件内容格式
  */
-
 public class MetaInfo {
-
-    public static final int MAGIC = 0x53334343; // S3CC
 
     /**
      * Header CRC32
@@ -25,17 +21,16 @@ public class MetaInfo {
     private final byte[] data;
 
 
-
     public MetaInfo(String s3KeyPrefix) {
         this.data = s3KeyPrefix.getBytes(StandardCharsets.UTF_8);
-        this.dataLen=data.length;
+        this.dataLen = data.length;
         updateCrc();
     }
 
-    public MetaInfo(int crc,int dataLen,byte[] data) {
-        this.crc=crc;
-        this.dataLen=dataLen;
-        this.data=data;
+    public MetaInfo(int crc, byte[] data) {
+        this.crc = crc;
+        this.data = data;
+        this.dataLen = data.length;
     }
 
     /**

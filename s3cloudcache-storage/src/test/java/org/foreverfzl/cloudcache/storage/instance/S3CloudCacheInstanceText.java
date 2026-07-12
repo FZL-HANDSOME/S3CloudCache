@@ -33,7 +33,6 @@ public class S3CloudCacheInstanceText {
                 .setBlockSize(BlockSizeLevel.SMALL.getBytes())
                 .setCacheSize(32 * 1024 * 1024L)
                 .setBlockUpLoadCount(BlockUploadConcurrencyLevel.LOW.getConcurrency())
-                .setPageFlushLevel(PageFlushLevel.NORMAL_20_MS.getFlushIntervalMs())
                 .setS3KeyPrefix("oreder/phone")
                 .setLockMappedFilePageCache(false)
                 .setWarmWalFile(true)
