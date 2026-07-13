@@ -18,7 +18,6 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.channels.FileChannel;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
@@ -349,8 +348,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //增加对应Block的期望字节数
             result.setLogicalIndex(logicalIndex);
             manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataStruct.getDataLen());
-            log.info("WAL======>文件={}，block逻辑索引={}，写入数据长度={}", this.fileFromOffset, logicalIndex,
-                    dataStruct.getDataLen());
         }
         return result;
     }
@@ -378,6 +375,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
+            //真正写的时候再去看看文件是否可写
+            if (!isAvailable()) {
+                return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+            }
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
@@ -390,26 +391,49 @@ public class DefaultMappedFile extends AbstractMappedFile {
         } catch (Exception e) {
             log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}",
                     writeOffset, size, fileName, e);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.UNKNOWN_ERROR, this.fileFromOffset);
+            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
         }
     }
 
 
     /**
-     * 删除对应文件并释放资源的方法
+     * 释放资源的方法
      */
     @Override
     public void clean() {
         try {
-            //释放mmp
-            arena.close();
-            fileChannel.close();
-            file.delete();
+            if (isCleanup()) {
+                return;
+            }
+            if (arena != null) {
+                arena.close();
+                arena = null;
+            }
+            if (fileChannel != null) {
+                fileChannel.close();
+                fileChannel = null;
+            }
+            mappedMemorySegment = null;
+            file = null;
+            blockEndOffsetInMappedFile = null;
         } catch (Exception e) {
-            throw new WalException(
-                    "Failed to Clean Filed: " + dirPath + File.separator + fileName, e
-            );
+            log.warn("{} file clean failed", this.fileFromOffset, e);
         }
+    }
+
+    @Override
+    public void delete() {
+        clean();
+    }
+
+    //是否能删除，true代表可以删除
+    public boolean canDelete() {
+        return getRefCount() == 0 && isCleanup() && !isAvailable();
+    }
+
+    //是否清除资源，true代表可以
+    public boolean canClean() {
+        return getRefCount() == 0 && !isAvailable() && readPosition == upLoadPosition;
     }
 
     @Override

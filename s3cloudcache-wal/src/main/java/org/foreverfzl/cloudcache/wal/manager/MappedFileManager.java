@@ -6,6 +6,7 @@ import org.foreverfzl.cloudcache.wal.datastruct.MetaInfo;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,6 +19,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -44,6 +46,7 @@ public class MappedFileManager {
     private final AtomicReference<DefaultMappedFile> upLoadActiveMappedFile = new AtomicReference<>();
 
     //检查所有的文件，控制文件是否要删除，把globalUpLoadPosition指针之前的文件全部删除，因为前面的文件已经上传到服务了
+    private final int chackMappedFileTime;
     private final Thread chackMappedFileThread;
     //当前活跃文件的最后一个文件
     private final AtomicReference<DefaultMappedFile> activeMappedFile = new AtomicReference<>();
@@ -86,6 +89,7 @@ public class MappedFileManager {
         this.blockMetaDataManager = new BlockMetaDataManager();
         this.saveBucketMeta(new MetaInfo(config.s3KeyPrefix));//保存该bucket的元数据
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
+        this.chackMappedFileTime = config.chackMappedFileTime;
         this.flushFileUpLoadPositonTime = config.flushFileUpLoadPositionTime;
         this.flushFileUpLoadPositionThread = new Thread(this::flushUpLoadPositionTask);
         this.chackMappedFileThread = new Thread(this::chackMappedFileTask);
@@ -114,9 +118,9 @@ public class MappedFileManager {
             oldMappedFile.hold();
             //先去目前活跃的文件中添加数据
             result = oldMappedFile.appendData(dataStruct);
-            AppendMessageResult.AppendStatus status = result.getStatus();
-            //文件到达结尾了或者该文件关闭了，使用新的文件重试,其它情况直接返回,交给Instance处理
-            if (status == AppendMessageResult.AppendStatus.END_OF_FILE || status == AppendMessageResult.AppendStatus.FILE_CLOSED) {
+            //只要写没成功，关闭文件创建新的文件重试
+            if (!result.isOk()) {
+                oldMappedFile.close();
                 //获取最新的写文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
                 synCreateMappedFile(nextFileOffset);
@@ -175,8 +179,8 @@ public class MappedFileManager {
 
     //刷新全局文件的上传指针
     private void flushUpLoadPositionTask() {
-        try {
-            while (active) {
+        while (active) {
+            try {
                 DefaultMappedFile mappedFile = upLoadActiveMappedFile.get();
                 if (mappedFile == null) {
                     // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
@@ -197,11 +201,16 @@ public class MappedFileManager {
                         }
                     }
                 }
-                Thread.sleep(flushFileUpLoadPositonTime);
+            } catch (Exception e) {
+                log.warn("flushUpLoadPositionTask failed", e);
             }
-        } catch (Exception e) {
-            log.error(e.getMessage());
-            Thread.currentThread().interrupt();
+            try {
+                Thread.sleep(flushFileUpLoadPositonTime);
+            } catch (Exception e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+
         }
     }
 
@@ -249,21 +258,41 @@ public class MappedFileManager {
     }
 
 
-    //检查WAL文件的生命周期
+    //检查WAL文件的生命周期，
     private void chackMappedFileTask() {
+        while (active) {
+            try {
+                //获取全局上传指针之前的所有文件
+                Collection<DefaultMappedFile> values = mappedFiles.headMap(globalUpLoadPosition).values();
+                if (!values.isEmpty()) {
+                    for (DefaultMappedFile file : values) {
+                        if (file.canDelete()) {
+                            //如果文件可以删除则直接删除
+                            file.delete();
+                            continue;
+                        }
+                        if (file.canClean()) {
+                            //文件关闭了，但是资源没清除，清除资源下一次删除
+                            file.clean();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("chackMappedFileTask failed", e);
+            }
+            try {
+                Thread.sleep(chackMappedFileTime);
+            } catch (Exception e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
 
+        }
     }
 
 
     private void flushFileMeta() {
         while (active) {
-            // Iterate over all mapped files and persist their meta information to the first 4KB region.
-            // The meta region layout (little‑endian, unaligned) is:
-            // offset 0  : readPosition   (long)
-            // offset 8  : uploadPosition (long)
-            // offset 16 : createTime     (long)
-            // offset 24 : CRC32 of the three longs (int)
-            // The remaining bytes are left untouched.
             for (Map.Entry<Long, DefaultMappedFile> entry : mappedFiles.entrySet()) {
                 DefaultMappedFile mappedFile = entry.getValue();
                 if (!mappedFile.metaDirty) {

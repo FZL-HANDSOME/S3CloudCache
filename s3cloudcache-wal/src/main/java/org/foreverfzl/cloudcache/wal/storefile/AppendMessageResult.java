@@ -69,19 +69,11 @@ public class AppendMessageResult {
         /**
          * 写入过程中发生未知错误
          */
-        UNKNOWN_ERROR,
+        WRITER_FAILED,
         /**
          * 文件关闭
          */
         FILE_CLOSED,
-        /**
-         * 数据太大,超过了单个文件的大小
-         */
-        MESSAGE_SIZE_EXCEEDED,
-        /**
-         * 物理磁盘满
-         */
-        DISK_FULL;
     }
 
     /**

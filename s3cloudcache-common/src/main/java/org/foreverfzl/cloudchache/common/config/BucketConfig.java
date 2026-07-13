@@ -50,9 +50,14 @@ public class BucketConfig {
      */
     public Integer flushFileMetaInfoTime = 5000;
     /**
-     * 每个对应一个上传指针，该时间就是刷新文件指针的时间，默认1s
+     * 每个文件对应一个上传指针，该时间就是刷新文件指针的时间，修改的是内存的指针，默认1s
      */
     public Integer flushFileUpLoadPositionTime = 1000;
+
+    /**
+     * 检查文件，并删除可以删除的文件，默认10s
+     */
+    public Integer chackMappedFileTime =10000;
 
 
     public BucketConfig() {

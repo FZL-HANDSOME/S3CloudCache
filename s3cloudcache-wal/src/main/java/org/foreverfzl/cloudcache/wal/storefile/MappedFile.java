@@ -7,14 +7,14 @@ import java.nio.channels.FileChannel;
 
 public interface MappedFile {
 
-    public void init(boolean isWarm,boolean isLockMemory);
+    public void init(boolean isWarm, boolean isLockMemory);
 
     /**
      * 文件预热，并且根据配置选择是否锁定预热PageCache
      *
      * @param pages
      */
-    public void warm(int pages,boolean isLockMemory);
+    public void warm(int pages, boolean isLockMemory);
 
     /**
      * 读取该文件数据
@@ -48,34 +48,19 @@ public interface MappedFile {
     /**
      * 关闭文件
      */
-    public void close();
+    public abstract void close();
 
     /**
-     * 删除文件，将文件标记为删除
-     */
-    public void delete();
-
-    /**
-     * 、
-     * 释放文件的引用
-     *
-     * @return
-     */
-    public int release();
-
-    /**
-     * 真正的清除该文件
+     * 清除文件的资源，但不真正删除文件
      *
      * @return
      */
     public abstract void clean();
 
     /**
-     * 获取该文件的引用
-     *
-     * @return
+     * 删除文件
      */
-    public int hold();
+    public abstract void delete();
 
 
 }

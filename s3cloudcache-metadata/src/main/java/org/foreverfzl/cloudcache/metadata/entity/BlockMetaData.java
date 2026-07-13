@@ -30,6 +30,8 @@ public class BlockMetaData {
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile int finishedBytes;
     private volatile long lastActiveTime;
+    //如果isBroken为true代表该物理block写入数据时产生错误了
+    private volatile boolean isBroken;
 
     static {
         STATE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "state");

@@ -7,25 +7,20 @@ public abstract class MappedFiledReferenceResource {
 
     private final AtomicInteger refCount = new AtomicInteger(0); //目前又多少个线程使用我
     private volatile boolean available = true; //是否可写
-    private volatile boolean cleanup = false; //是否要删除这个文件
+    private volatile boolean cleanup = false; //文件资源是否清除
 
 
     public boolean isAvailable() {
         return this.available;
     }
 
-    public long getRefCount() {
+    public int getRefCount() {
         return this.refCount.get();
     }
 
     //关闭文件写入
     public void close() {
         if(available) this.available = false;
-    }
-
-    public void delete() {
-        this.available=false;
-        this.cleanup = true;
     }
 
     //释放该文件的引用
@@ -42,5 +37,8 @@ public abstract class MappedFiledReferenceResource {
         return -1;
     }
 
+    public boolean isCleanup() {
+        return cleanup;
+    }
 
 }
