@@ -62,7 +62,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         //去容器中看看有没有对应的manager，有则返回，没有则创建
         MappedFileManager bucketWalManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
         CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName,bucketWalManager.blockMetaDataManager);
-        return new BucketWriterWriter(bucketName,bucketWalManager,bucketCoreManager,this);
+        return new BucketWriterWriter(bucketName,bucketWalManager,bucketCoreManager,bucketWalManager.blockMetaDataManager,this);
     }
 
     //todo 关闭资源

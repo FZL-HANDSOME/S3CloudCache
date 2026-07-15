@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,7 +66,7 @@ public class CacheBlockUpdater {
                     handleUploadFailure(block);
                 }
             } catch (Throwable t) {
-                log.warn("Exception is={},instance={},bucket={}:Failed to upload this block=>{}", t,manager.instanceName, manager.bucketName, block);
+                log.warn("Exception is={},instance={},bucket={}:Failed to upload this block=>{}", t, manager.instanceName, manager.bucketName, block);
                 handleUploadFailure(block);
             } finally {
                 // 4. 无论成功失败，释放令牌，让下一个块上云
@@ -109,7 +110,7 @@ public class CacheBlockUpdater {
      */
     private void handleUploadFailure(CloudCacheBlock block) {
         //将元数据设置为失败
-        manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(),block.getLogicalIndex());
+        manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex());
     }
 
     public void close() throws Exception {

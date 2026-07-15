@@ -2,9 +2,11 @@ package org.foreverfzl.cloudcache.wal.manager;
 
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.MetaInfo;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
@@ -290,7 +292,7 @@ public class MappedFileManager {
         }
     }
 
-
+    //刷新文件元数据区域(刷新的都是需要改变的数据)
     private void flushFileMeta() {
         while (active) {
             for (Map.Entry<Long, DefaultMappedFile> entry : mappedFiles.entrySet()) {
@@ -305,7 +307,7 @@ public class MappedFileManager {
                     // Use file creation time if needed; fall back to current time.
                     long updateTime = System.currentTimeMillis();
                     // Write into the first 4KB of the mapped file.
-                    MemorySegment metaSegment = mappedFile.getMappedMemorySegment().asSlice(0, DefaultMappedFile.FILE_META_SIZE);
+                    MemorySegment metaSegment = mappedFile.getMappedMemorySegmentSlice(0, FileMetaInfo.FILE_META_SIZE);
                     long pos = 0;
                     metaSegment.set(ValueLayout.JAVA_LONG, pos, readPos);
                     pos += Long.BYTES;
@@ -325,6 +327,10 @@ public class MappedFileManager {
                 break;
             }
         }
+    }
+
+    public DefaultMappedFile getFile(long fileFromOffset, int blockIndex) {
+        return mappedFiles.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
     public AtomicReference<DefaultMappedFile> getActiveMappedFile() {

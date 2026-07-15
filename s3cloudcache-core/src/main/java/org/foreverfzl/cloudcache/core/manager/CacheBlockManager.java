@@ -5,7 +5,6 @@ import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
-import org.foreverfzl.cloudcache.metadata.manager.BlockUpLoadQueueManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -35,7 +34,7 @@ public class CacheBlockManager {
     // 空闲/干净的 CloudCacheBlock 池
     private final BlockingQueue<CloudCacheBlock> freeBlocks;
 
-    // 根据自定义 key 维护的 K-V 映射，key为fileFromOffset+NameBlockIndex
+    // 根据自定义 key 维护的 K-V 映射，key为fileFromOffset+BlockIndex
     private final ConcurrentHashMap<Long, CloudCacheBlock> keyBlockMap;
     //1024个锁分片，防止fileFromOffset+NameBlockIndex一个组合获取多个Block
     private final Object[] blockLocks = new Object[256];
@@ -46,11 +45,8 @@ public class CacheBlockManager {
     //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
 
-    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
-    public BlockUpLoadQueueManager blockUpLoadQueueManager;
-
     //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
-    private volatile boolean activeQueueTaskThread = true;
+    private volatile boolean active = true;
     private final Thread getBlockUpLoadQueueTaskThread;
 
     public CacheBlockManager(String instanceName, String bucketName, BlockMetaDataManager blockMetaDataManager, S3Client s3Client, BucketConfig config) {
@@ -65,7 +61,6 @@ public class CacheBlockManager {
         this.keyBlockMap = new ConcurrentHashMap<>();
         this.blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client, config.enableHeadCheck);
         this.blockMetaDataManager = blockMetaDataManager;
-        this.blockUpLoadQueueManager = blockMetaDataManager.blockUpLoadQueueManager;
         this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
@@ -83,9 +78,9 @@ public class CacheBlockManager {
 
 
     private void getBlockUpLoadQueue() {
-        while (activeQueueTaskThread) {
+        while (active) {
             try {
-                UploadTask task = blockUpLoadQueueManager.take();
+                UploadTask task = blockMetaDataManager.getTaskFromUpLoadQueue();
                 CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(task.getFileFromOffset(), task.getLogicalIndex()));
                 if (cacheBlock == null) {
                     return;
@@ -95,6 +90,7 @@ public class CacheBlockManager {
                     blockUpdater.upLoadBlock(cacheBlock);
                 }
             } catch (InterruptedException e) {
+                active=false;
                 throw new RuntimeException(e);
             }
         }
@@ -110,9 +106,11 @@ public class CacheBlockManager {
         CloudCacheBlock cacheBlock = null;
         long curWritePosition = 0;
         int size = 0;
+        long fileFromOffset = dataStruct.getFileFromOffset();
+        int blockIndex = dataStruct.getBlockIndex();
         try {
             size = dataStruct.getDataLen();
-            cacheBlock = getBlock(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex());
+            cacheBlock = getBlock(fileFromOffset, blockIndex);
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
@@ -124,19 +122,18 @@ public class CacheBlockManager {
                 isSuccess = dataStruct.writeTo(cacheBlockSegment);
             }
             if (isSuccess) {
-                blockMetaDataManager.addFinishedBytes(dataStruct.getFileFromOffset(), dataStruct.getBlockIndex(), size);
+                blockMetaDataManager.addFinishedBytes(fileFromOffset, blockIndex, size);
             } else {
                 log.warn("{} block write failed", cacheBlock.getS3Key());
                 throw new CoreException("failed to write data in block");
             }
         } catch (Exception e) {
             //写入失败或者抛出异常，直接回收该block，拿一块新的block去WAL文件中恢复数据
-            return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, false,
-                    cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
+            blockMetaDataManager.setMetaDataBroken(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(fileFromOffset, blockIndex);
         } finally {
             //写完后释放引用
             if (cacheBlock != null) cacheBlock.releaseReference();
-
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
                 cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
@@ -155,7 +152,7 @@ public class CacheBlockManager {
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
-    private CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
+    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
         long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);

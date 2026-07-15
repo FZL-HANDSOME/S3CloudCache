@@ -108,4 +108,12 @@ public class BlockMetaData {
     public long getLastActiveTime() {
         return lastActiveTime;
     }
+
+    public void setBroken() {
+        isBroken = true;
+    }
+
+    public boolean isBroken() {
+        return isBroken;
+    }
 }

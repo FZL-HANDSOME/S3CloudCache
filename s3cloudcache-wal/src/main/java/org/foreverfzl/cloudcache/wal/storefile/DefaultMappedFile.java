@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
@@ -54,8 +55,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected Arena arena;
     protected MemorySegment mappedMemorySegment; //本质是MMP内存映射
 
-    //每个文件开头元数据区域大小
-    public static final long FILE_META_SIZE = 4 * 1024;
 
     //Block、upLoadPosition更新相关
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
@@ -140,6 +139,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 //进行文件预热，每16384页刷盘一次，防止脏页过多
                 warm(16384, isLockMemory);
             }
+            //预热完毕后将一些不变的文件元数据写入到文件开头的4KB中
+            long pos = 0;
+            MemorySegment segment = mappedMemorySegment.asSlice(0, FileMetaInfo.FILE_META_SIZE);
+            //blockSize
+            segment.set(JAVA_INT, pos, blockSize);
+            //刷盘
+            segment.force();
         } catch (Exception e) {
             throw new WalException(
                     "Failed to initialize cache file: " + fileName, e
@@ -199,28 +205,35 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
+    //从指定位置获取一个int
+    public int getInt(long fromOffset) {
+        return mappedMemorySegment.get(JAVA_INT, fromOffset);
+    }
+
+    //从指定位置获取大小为sie的原始数据
+    public byte[] getOrgData(long fromOffset, int size) {
+        byte[] valueBytes = new byte[size];
+        MemorySegment.copy(
+                mappedMemorySegment,
+                ValueLayout.JAVA_BYTE,
+                fromOffset,
+                valueBytes,
+                0,
+                size
+        );
+        return valueBytes;
+    }
+
 
     /**
      * 从该文件中读取指定区域的数据，并反序列化为 WalDataStruct 对象。
      */
-    @Override
     public WalDataStruct getData(long readOffset, long size) {
-        // 1. 参数校验
-        if (readOffset < 0 || size <= 0) {
-            log.warn("getData: invalid parameters, readOffset={}, size={}", readOffset, size);
-            return null;
-        }
-        // 至少需要能容纳协议头部
-        if (size < WalDataStruct.HEADER_LENGTH) {
-            log.warn("getData: size={} is less than HEADER_LENGTH={}, fileName={}",
-                    size, WalDataStruct.HEADER_LENGTH, fileName);
-            return null;
-        }
         // 边界检查：确保读取范围不超过已写入区域
-        long currentWrotePosition = WROTE_POSITION_UPDATER.get(this);
-        if (readOffset + size > currentWrotePosition) {
+        long curReadPosition = READ_POSITION_UPDATER.get(this);
+        if (readOffset + size > curReadPosition) {
             log.warn("getData: read range [{}, {}) exceeds wrotePosition {}, fileName={}",
-                    readOffset, readOffset + size, currentWrotePosition, fileName);
+                    readOffset, readOffset + size, curReadPosition, fileName);
             return null;
         }
 
@@ -309,7 +322,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
                     manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
-                    doPadding(currentPos, (int) remainingInBlock);
+                    //padding至少4字节，如果少于4字节不做padding
+                    if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
                     continue;
                 }
@@ -323,7 +337,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
-                    doPadding(currentPos, (int) remainingInBlock);
+                    if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
                     continue;
                 }
@@ -342,7 +356,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
-        AppendMessageResult result = doAppend(FILE_META_SIZE + currentPos, msgSize, dataStruct);
+        AppendMessageResult result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
         if (result.isOk()) {
             this.metaDirty = true;
             //增加对应Block的期望字节数
@@ -353,11 +367,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     private void doPadding(long startPos, int length) {
-        // 假设你的 WalDataStruct 魔数是特定的，我们这里用一个绝对不会撞车的 PADDING_MAGIC
-        // 只需要在残渣的开头写 8 个字节，后面的空间根本不需要去 fill(0)！
         MemorySegment segment = mappedMemorySegment.asSlice(startPos, length);
         segment.set(JAVA_INT, 0, PaddingStruct.PADDING_MAGIC);
-        segment.set(JAVA_INT, 4, length);
         // 性能开销几乎为 0，同时完美解决了文件自解析和读取器阻塞的问题
     }
 
@@ -441,13 +452,22 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return this.fileName;
     }
 
+    public int getBlockSize() {
+        return blockSize;
+    }
+
     @Override
     public FileChannel getFileChannel() {
         return this.fileChannel;
     }
 
-    public MemorySegment getMappedMemorySegment() {
-        return mappedMemorySegment;
+    public MemorySegment getBlockMappedMemorySegmentSlice(int blockIndex) {
+        long fromOffset = (long) blockIndex * blockSize;
+        return mappedMemorySegment.asSlice(fromOffset, blockSize);
+    }
+
+    public MemorySegment getMappedMemorySegmentSlice(long fromOffset, long size) {
+        return mappedMemorySegment.asSlice(fromOffset, size);
     }
 
     //返回true则代表还会继续更新upLoad指针

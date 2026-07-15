@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 
@@ -12,16 +13,19 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class BlockMetaDataManager {
 
+    //key为fileFromOffset+blockIndex
     private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
     //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
-    public BlockUpLoadQueueManager blockUpLoadQueueManager;
+    private final BlockUpLoadQueueManager blockUpLoadQueueManager = new BlockUpLoadQueueManager();
+
+    private final BlockRecoverQueueManager blockRecoverQueueManager = new BlockRecoverQueueManager();
 
     public BlockMetaDataManager() {
-        blockUpLoadQueueManager = new BlockUpLoadQueueManager();
+
     }
 
     public void chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
-        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
+        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
         if (blockMetaData == null) {
             return;
         }
@@ -37,28 +41,42 @@ public class BlockMetaDataManager {
         }
         //封口然后放入到上传队列中
         blockMetaData.trySeal();
-        blockUpLoadQueueManager.submit(new UploadTask( fileFromOffset, blockIndex));
+        blockUpLoadQueueManager.submit(new UploadTask(fileFromOffset, blockIndex));
+    }
+
+    public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
+        return blockUpLoadQueueManager.take();
+    }
+
+    public RecoverTask getTaskFromRecoverQueue() throws InterruptedException {
+        return blockRecoverQueueManager.take();
+    }
+
+    //将对应的元数据设置为Broke
+    public void setMetaDataBroken(long fileFromOffset, int blockIndex) {
+        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
+        blockMetaData.setBroken();
     }
 
     /**
      * 获取或者创建BlockMetaData
      */
     public BlockMetaData getOrCreate(long fileFromOffset, int blockIndex) {
-        return metaDataMap.computeIfAbsent(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex), k -> new BlockMetaData());
+        return metaDataMap.computeIfAbsent(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex), k -> new BlockMetaData());
     }
 
     /**
      * 获取BlockMetaData
      */
-    public BlockMetaData get(long fileFromOffset ,int blockIndex) {
-        return metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
+    public BlockMetaData get(long fileFromOffset, int blockIndex) {
+        return metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
     /**
      * 删除BlockMetaData
      */
     public void remove(long fileFromOffset, int blockIndex) {
-        metaDataMap.remove(ProjectUtil.buildBlockKey(fileFromOffset,blockIndex));
+        metaDataMap.remove(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
     /**
@@ -81,7 +99,11 @@ public class BlockMetaDataManager {
      * CAS封口
      */
     public void trySeal(long fileFromOffset, int blockIndex) {
-        get(fileFromOffset, blockIndex).trySeal();
+        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        boolean b = blockMetaData.trySeal();
+        if (b && blockMetaData.isBroken()) {
+            blockRecoverQueueManager.submit(new RecoverTask(fileFromOffset, blockIndex));
+        }
     }
 
 
@@ -97,7 +119,7 @@ public class BlockMetaDataManager {
      * CAS改为上传完成，也就是直接删除对应的元数据
      */
     public void markUploadSuccess(long fileFromOffset, int blockIndex) {
-        this.remove(fileFromOffset,blockIndex);
+        this.remove(fileFromOffset, blockIndex);
     }
 
     /**

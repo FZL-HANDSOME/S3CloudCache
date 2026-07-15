@@ -3,6 +3,7 @@ package org.foreverfzl.cloudcache.wal.storefile;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.channels.FileChannel;
 
 public interface MappedFile {
@@ -17,15 +18,6 @@ public interface MappedFile {
     public void warm(int pages, boolean isLockMemory);
 
     /**
-     * 读取该文件数据
-     *
-     * @param readOffset 起始位置
-     * @param size       文件大小
-     * @return
-     */
-    public WalDataStruct getData(final long readOffset, final long size);
-
-    /**
      *
      * @param dataStruct 磁盘持久化协议格式
      * @return
@@ -36,6 +28,8 @@ public interface MappedFile {
     String getFileName();
 
     FileChannel getFileChannel();
+
+    int getBlockSize();
 
     /**
      * 检查文件是否可用
