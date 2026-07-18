@@ -8,7 +8,6 @@ public class FileMetaInfo {
     public static final long FILE_META_SIZE = 4 * 1024;
 
     //元数据区域严格按照下面的结构
-    private int blockSize;
     private long readPosition;
     private long uploadPosition;
     private long updateTime;

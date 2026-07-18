@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -59,6 +60,9 @@ public class CacheBlockUpdater {
                 if (isSuccess) {
                     //将元数据设置为上传成功
                     manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
+                    //然后ack确认上传指针
+                    DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
+                    defaultMappedFile.ackUpLoadPosition(logicalIndex);
                     // 成功后归还内存
                     manager.recycleBlock(block);
                 } else {

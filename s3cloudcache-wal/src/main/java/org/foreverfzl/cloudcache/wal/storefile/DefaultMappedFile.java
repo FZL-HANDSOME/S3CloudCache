@@ -59,7 +59,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     //Block、upLoadPosition更新相关
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
     protected int blockSize;
-    protected long[] blockEndOffsetInMappedFile; //upLoadPosition指针更新辅助数组指针更新辅助数组
+    protected long[] upLoadEndOffset; //upLoadPosition指针更新辅助数组指针更新辅助数组
     protected AtomicInteger nextUploadBlockIndex = new AtomicInteger(0); //upLoadPosition指针期望下次更新index
     //引入数组元素的 VarHandle，用于消灭原生数组的内存可见性缺陷
     private static final VarHandle ARRAY_ELEMENT_HANDLE;
@@ -88,7 +88,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.manager = manager;
         this.metaDirty = false;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
-        blockEndOffsetInMappedFile = new long[totalBlockCount];
+        upLoadEndOffset = new long[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
         init(isWarm, isLockMemory);
     }
@@ -139,13 +139,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 //进行文件预热，每16384页刷盘一次，防止脏页过多
                 warm(16384, isLockMemory);
             }
-            //预热完毕后将一些不变的文件元数据写入到文件开头的4KB中
-            long pos = 0;
-            MemorySegment segment = mappedMemorySegment.asSlice(0, FileMetaInfo.FILE_META_SIZE);
-            //blockSize
-            segment.set(JAVA_INT, pos, blockSize);
-            //刷盘
-            segment.force();
         } catch (Exception e) {
             throw new WalException(
                     "Failed to initialize cache file: " + fileName, e
@@ -165,7 +158,32 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return;
         }
         // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
-        ARRAY_ELEMENT_HANDLE.setVolatile(this.blockEndOffsetInMappedFile, logicalIndex, (long) (logicalIndex + 1) * blockSize);
+        ARRAY_ELEMENT_HANDLE.setVolatile(this.upLoadEndOffset, logicalIndex, (long) (logicalIndex + 1) * blockSize);
+        //每个线程都去看一下是否能进行更新
+        while (true) {
+            // 在循环外固定当前要检查的索引
+            int currentIndex = nextUploadBlockIndex.get();
+            // 检查当前索引位置是否已填坑
+            long offset = (long) ARRAY_ELEMENT_HANDLE.getVolatile(this.upLoadEndOffset, currentIndex);
+            if (offset == 0) {
+                // 当前 block 还没上传完，无法推进
+                break;
+            }
+            // 尝试原子推进上传指针
+            long curUpLoadPosition = UPLOAD_POSITION_UPDATER.get(this);
+            long expectedNewPosition = offset; // 或者 upLoadEndOffset[currentIndex]
+            if (curUpLoadPosition == expectedNewPosition) {
+                // 已经推进过了，跳出循环
+                break;
+            }
+            if (UPLOAD_POSITION_UPDATER.compareAndSet(this, curUpLoadPosition, expectedNewPosition)) {
+                // CAS 成功，原子递增索引
+                nextUploadBlockIndex.incrementAndGet();
+            } else {
+                break;
+            }
+
+        }
     }
 
     /**
@@ -292,8 +310,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final DataStruct dataStruct) {
-        if (!isAvailable())
-            return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+        if (!isAvailable()) return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
@@ -316,7 +333,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 if (paddingPos == this.fileSize) {
                     manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                     close(); //关闭文件
-                    return AppendMessageResult.fail(AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                    return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
                 }
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
@@ -388,13 +405,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
         try {
             //真正写的时候再去看看文件是否可写
             if (!isAvailable()) {
-                return new AppendMessageResult(AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+                return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
             }
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
             dataStruct.writeTo(targetSlice);
-            return new AppendMessageResult(
+            return new AppendMessageResult(this,
                     AppendMessageResult.AppendStatus.PUT_OK,
                     System.currentTimeMillis(),
                     this.fileFromOffset
@@ -402,7 +419,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         } catch (Exception e) {
             log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}",
                     writeOffset, size, fileName, e);
-            return AppendMessageResult.fail(AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
+            return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
         }
     }
 
@@ -426,7 +443,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             }
             mappedMemorySegment = null;
             file = null;
-            blockEndOffsetInMappedFile = null;
+            upLoadEndOffset = null;
         } catch (Exception e) {
             log.warn("{} file clean failed", this.fileFromOffset, e);
         }

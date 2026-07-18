@@ -12,6 +12,11 @@ public class AppendMessageResult {
     private final AppendStatus status;
 
     /**
+     * 写入的文件引用
+     */
+    private final DefaultMappedFile defaultMappedFile;
+
+    /**
      * 写入的目标文件名
      */
     private final long fileFromOffset;
@@ -27,14 +32,8 @@ public class AppendMessageResult {
     private final long storeTimestamp;
 
 
-    public AppendMessageResult(AppendStatus status, long fileFromOffset) {
-        this.status = status;
-        this.fileFromOffset = fileFromOffset;
-        storeTimestamp = -1;
-        logicalIndex = -1;
-    }
-
-    public AppendMessageResult(AppendStatus status,long storeTimestamp, long fileFromOffset) {
+    public AppendMessageResult(DefaultMappedFile defaultMappedFile,AppendStatus status, long storeTimestamp, long fileFromOffset) {
+        this.defaultMappedFile=defaultMappedFile;
         this.status = status;
         this.storeTimestamp = storeTimestamp;
         this.fileFromOffset = fileFromOffset;
@@ -45,8 +44,8 @@ public class AppendMessageResult {
     /**
      * 创建一个表示失败的结果（不携带偏移和字节数信息）
      */
-    public static AppendMessageResult fail(AppendStatus status, long fileFromOffset) {
-        return new AppendMessageResult(status, System.currentTimeMillis(), fileFromOffset);
+    public static AppendMessageResult fail(DefaultMappedFile defaultMappedFile,AppendStatus status, long fileFromOffset) {
+        return new AppendMessageResult(defaultMappedFile,status, System.currentTimeMillis(), fileFromOffset);
     }
 
 
@@ -101,6 +100,10 @@ public class AppendMessageResult {
 
     public void setLogicalIndex(int logicalIndex) {
         this.logicalIndex = logicalIndex;
+    }
+
+    public DefaultMappedFile getDefaultMappedFile() {
+        return defaultMappedFile;
     }
 
     @Override

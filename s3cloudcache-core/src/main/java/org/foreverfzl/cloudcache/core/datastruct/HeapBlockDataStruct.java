@@ -1,5 +1,7 @@
 package org.foreverfzl.cloudcache.core.datastruct;
 
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 
@@ -8,6 +10,7 @@ import java.lang.foreign.ValueLayout;
  */
 public class HeapBlockDataStruct implements BlockDataStruct{
 
+    private final DefaultMappedFile defaultMappedFile;
     private final long fileFromOffset;
     private final int blockIndex;
     private final int fromOffset;
@@ -15,7 +18,8 @@ public class HeapBlockDataStruct implements BlockDataStruct{
     private final byte[] dataBytes;
 
 
-    public HeapBlockDataStruct(long fileFromOffset, int blockIndex, byte[] dataBytes, int fromOffset, int dataLen) {
+    public HeapBlockDataStruct(DefaultMappedFile defaultMappedFile,long fileFromOffset, int blockIndex, byte[] dataBytes, int fromOffset, int dataLen) {
+        this.defaultMappedFile = defaultMappedFile;
         this.fileFromOffset = fileFromOffset;
         this.blockIndex = blockIndex;
         this.dataBytes = dataBytes;
@@ -57,4 +61,7 @@ public class HeapBlockDataStruct implements BlockDataStruct{
         return dataLen;
     }
 
+    public DefaultMappedFile getDefaultMappedFile() {
+        return defaultMappedFile;
+    }
 }

@@ -26,6 +26,7 @@ public class WalInstanceBucketManager {
     protected static final Logger log = LoggerFactory.getLogger(LogName.WAL_INSTANCE_BUCKET_MANAGER);
 
     private static final int LOCKS_COUNT = 128;
+    //key是bucketName
     private final ConcurrentHashMap<String, MappedFileManager> managerHashMap;
     private final String instanceName;
     private final S3CloudCacheConfig config;
@@ -38,10 +39,10 @@ public class WalInstanceBucketManager {
     private static final ScheduledExecutorService checkBlockMetaExecutor = Executors.newSingleThreadScheduledExecutor();
 
 
-    public WalInstanceBucketManager(String instanceName, String instanceDirPath, S3CloudCacheConfig config) {
+    public WalInstanceBucketManager(String instanceName, S3CloudCacheConfig config) {
         this.instanceName = instanceName;
         this.config = config;
-        this.instanceDirPath = instanceDirPath;
+        this.instanceDirPath = config.walPath + File.separator + instanceName;
         this.blockMaxIdleTime = config.blockMaxIdleTime;
         managerHashMap = new ConcurrentHashMap<>();
         locks = new ReentrantLock[LOCKS_COUNT];
@@ -72,11 +73,9 @@ public class WalInstanceBucketManager {
                 blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
             }
         } catch (Exception e) {
-            log.warn("checkBlockMeta Task Failed",e);
+            log.warn("checkBlockMeta Task Failed", e);
         }
     }
-
-
 
 
     /**
@@ -97,7 +96,7 @@ public class WalInstanceBucketManager {
                 return manager;
             }
             // 创建新的MappedFileManager
-            String managerDirPath = instanceDirPath + File.separator + instanceName + File.separator + bucketName;
+            String managerDirPath = File.separator + bucketName;
             BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
             BucketConfig realBucketConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
             manager = new MappedFileManager(managerDirPath, instanceName, bucketName, realBucketConfig);

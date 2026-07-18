@@ -40,6 +40,7 @@ public class S3CloudCacheInstanceText {
         S3CloudCacheConfig s3CloudCacheConfig = new S3CloudCacheConfig("textinstance", null, defaluetBucketConfig);
         //创建Instance
         S3CloudCacheInstance textInstance = new S3CloudCacheInstance(s3Client, s3CloudCacheConfig);
+        textInstance.start();
         //获取特定的Bucket高效写入
         BucketWriterWriter textBucket = textInstance.getBucketWriterInstance("textbucket");
 

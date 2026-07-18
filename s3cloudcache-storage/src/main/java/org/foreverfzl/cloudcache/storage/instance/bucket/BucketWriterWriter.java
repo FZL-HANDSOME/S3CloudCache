@@ -1,7 +1,6 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
-import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
@@ -9,7 +8,6 @@ import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.WriteResult;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
@@ -18,7 +16,6 @@ import org.foreverfzl.cloudchache.common.LogName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
 
@@ -39,7 +36,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private final BlockMetaDataManager blockMetaDataManager;
     private volatile boolean active = true;
-    private Thread getBlockBrokenTask;
+    private Thread getBlockBrokenTaskThread;
 
     public BucketWriterWriter(String bucketName, MappedFileManager mappedFileManager, CacheBlockManager cacheBlockManager, BlockMetaDataManager blockMetaDataManager,
                               S3CloudCacheInstance instance) {
@@ -48,12 +45,12 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         this.cacheBlockManager = cacheBlockManager;
         this.instance = instance;
         this.blockMetaDataManager = blockMetaDataManager;
-        getBlockBrokenTask = new Thread(this::getBlockBroken);
+        getBlockBrokenTaskThread = new Thread(this::getBlockBroken);
         init();
     }
 
     private void init() {
-
+//        getBlockBrokenTaskThread.start();
     }
 
 
@@ -65,7 +62,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             if (!result.isOk()) {
                 log.warn("WAL数据添加失败，result==>{}", result);
             }
-            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getFileFromOffset(), result.getLogicalIndex()
+            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(),result.getFileFromOffset(), result.getLogicalIndex()
                     , data, 0, data.length);
             AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
             if (!blockResult.result()) {
@@ -108,6 +105,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 long pos = fileFromOffset + ((long) blockIndex * blockSize);
                 CRC32 crc = new CRC32();
                 //如果可以读int并且是正常数据则读取
+                //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
                 while (endPos - pos >= 4 && mappedFile.getInt(pos) == DataStruct.MAGIC_NUMBER) {
                     pos += 4;
                     int chackSum = mappedFile.getInt(pos);
@@ -123,7 +121,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    cacheBlockManager.appendData(new HeapBlockDataStruct(fileFromOffset, blockIndex, orgData, 0, dataLen));
+                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile,fileFromOffset, blockIndex, orgData, 0, dataLen));
                     crc.reset();
                 }
             } catch (InterruptedException interruptedException) {

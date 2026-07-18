@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.core.cache;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
 import java.lang.foreign.MemorySegment;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
@@ -24,8 +25,10 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     private final CacheBlockManager manager;
 
     //逻辑位点层，这一部分在分配WAL文件写指针后确认
+    private DefaultMappedFile defaultMappedFile;
     private long fileFromOffset;
     private int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
+
 
     static {
         WROTE_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(CloudCacheBlock.class, "writePosition");
@@ -131,9 +134,18 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.fileFromOffset = fileFromOffset;
     }
 
+    public DefaultMappedFile getDefaultMappedFile() {
+        return defaultMappedFile;
+    }
+
+    public void setDefaultMappedFile(DefaultMappedFile defaultMappedFile) {
+        this.defaultMappedFile = defaultMappedFile;
+    }
+
     public void clean() {
         this.s3Key = null;
         this.writePosition = 0;
+        this.defaultMappedFile = null;
         this.fileFromOffset = 0;
         this.logicalIndex = 0;
         this.refCount.set(0);

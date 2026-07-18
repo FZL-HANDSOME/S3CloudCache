@@ -8,9 +8,10 @@ import java.util.zip.CRC32;
  */
 public class MetaInfo {
 
-    /**
-     * Header CRC32
-     */
+    private long fileSize;
+
+    private int blockSize;
+
     private int crc;
 
     private final int dataLen;
@@ -21,7 +22,9 @@ public class MetaInfo {
     private final byte[] data;
 
 
-    public MetaInfo(String s3KeyPrefix) {
+    public MetaInfo(long fileSize,int blockSize,String s3KeyPrefix) {
+        this.fileSize=fileSize;
+        this.blockSize=blockSize;
         this.data = s3KeyPrefix.getBytes(StandardCharsets.UTF_8);
         this.dataLen = data.length;
         updateCrc();
@@ -33,22 +36,15 @@ public class MetaInfo {
         this.dataLen = data.length;
     }
 
+
     /**
      * 更新 CRC
      */
     public void updateCrc() {
         CRC32 crc32 = new CRC32();
+        crc32.update(dataLen);
         crc32.update(data);
         this.crc = (int) crc32.getValue();
-    }
-
-    /**
-     * 校验 CRC
-     */
-    public boolean verifyCrc() {
-        CRC32 crc32 = new CRC32();
-        crc32.update(data);
-        return this.crc == (int) crc32.getValue();
     }
 
     public int getCrc() {
@@ -61,5 +57,13 @@ public class MetaInfo {
 
     public byte[] getData() {
         return data;
+    }
+
+    public long getFileSize() {
+        return fileSize;
+    }
+
+    public int getBlockSize() {
+        return blockSize;
     }
 }

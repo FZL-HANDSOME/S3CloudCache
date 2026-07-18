@@ -24,7 +24,6 @@ public final class ProjectUtil {
     //用户目录
     public static final String USER_HOME = System.getProperty("user.home");
     public static final String WAL_FILE_ADDRESS = File.separator + "CloudCache" + File.separator + "store";
-    public static final String PREFIX_FILE_NAME = "prefix";
 
     public static final Unsafe UNSAFE;
     //操作系统页大小

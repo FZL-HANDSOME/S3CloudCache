@@ -89,7 +89,7 @@ public class MappedFileManager {
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
-        this.saveBucketMeta(new MetaInfo(config.s3KeyPrefix));//保存该bucket的元数据
+        this.saveBucketMeta(new MetaInfo(config.walFileSize, config.blockSize, config.s3KeyPrefix));//保存该bucket的元数据
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
         this.chackMappedFileTime = config.chackMappedFileTime;
         this.flushFileUpLoadPositonTime = config.flushFileUpLoadPositionTime;
@@ -125,8 +125,7 @@ public class MappedFileManager {
                 oldMappedFile.close();
                 //获取最新的写文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
-                synCreateMappedFile(nextFileOffset);
-                DefaultMappedFile newFile = mappedFiles.get(nextFileOffset);
+                DefaultMappedFile newFile=synCreateMappedFile(nextFileOffset);
                 if (newFile != null) {
                     activeMappedFile.compareAndSet(oldMappedFile, newFile);
                     //然后使用新的文件进行写
@@ -153,23 +152,25 @@ public class MappedFileManager {
     /**
      * 同步创建新的文件并放入到容器中
      */
-    private void synCreateMappedFile(long fileFromOffset) {
+    public DefaultMappedFile synCreateMappedFile(long fileFromOffset) {
         String fileName = String.valueOf(fileFromOffset);
         //这里水位线线程 和 其它线程可能出现冲突，同时创建文件，需要加锁
         synchronized (fileName.intern()) {
             try {
                 //先去看看新文件是否已经创建好了
-                if (mappedFiles.get(fileFromOffset) != null) {
-                    return;
+                DefaultMappedFile defaultMappedFile = mappedFiles.get(fileFromOffset);
+                if (defaultMappedFile != null) {
+                    return defaultMappedFile;
                 }
                 DefaultMappedFile newFile = null;
                 newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, config.walFileSize,
                         config.blockSize, config.isWarmWalFile, config.isLockMappedFilePageCache, this);
                 //文件为null有可能其它线程已经创建了文件了
                 if (newFile == null) {
-                    return;
+                    return null;
                 }
                 mappedFiles.put(fileFromOffset, newFile);
+                return newFile;
             } catch (Exception e) {
                 log.warn("Exception is{} . synCreateMappedFile failed, instance={},bucket={},fileName={}",
                         e, instanceName, bucketName, fileName);
@@ -237,12 +238,18 @@ public class MappedFileManager {
                     arena
             );
             long pos = 0;
+            //fileSize
+            segment.set(ValueLayout.JAVA_LONG, pos, metaInfo.getFileSize());
+            pos += 8;
+            //blockSize
+            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getBlockSize());
+            pos += 4;
             // CRC
-            segment.set(ValueLayout.JAVA_INT_UNALIGNED, pos, metaInfo.getCrc());
-            pos += Integer.BYTES;
+            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getCrc());
+            pos += 4;
             // dataLen
-            segment.set(ValueLayout.JAVA_INT_UNALIGNED, pos, metaInfo.getDataLen());
-            pos += Integer.BYTES;
+            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getDataLen());
+            pos += 4;
             // data
             MemorySegment.copy(
                     metaInfo.getData(),
