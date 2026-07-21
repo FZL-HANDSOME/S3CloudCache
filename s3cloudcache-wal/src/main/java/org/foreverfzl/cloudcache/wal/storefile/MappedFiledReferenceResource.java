@@ -20,7 +20,7 @@ public abstract class MappedFiledReferenceResource {
 
     //关闭文件写入
     public void close() {
-        if(available) this.available = false;
+        if (available) this.available = false;
     }
 
     //释放该文件的引用
@@ -35,6 +35,10 @@ public abstract class MappedFiledReferenceResource {
             return refCount.incrementAndGet();
         }
         return -1;
+    }
+
+    public void setClean() {
+        if (!cleanup) this.cleanup = true;
     }
 
     public boolean isCleanup() {

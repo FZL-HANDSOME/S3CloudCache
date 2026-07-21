@@ -1,8 +1,10 @@
 package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
+import org.foreverfzl.cloudchache.common.exception.CoreException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -56,21 +58,27 @@ public class CacheBlockUpdater {
                 int logicalIndex = block.getLogicalIndex();
                 manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex);
                 // 执行重度网络 I/O
-                boolean isSuccess = executeUpload(block);
-                if (isSuccess) {
-                    //将元数据设置为上传成功
-                    manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
-                    //然后ack确认上传指针
-                    DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
-                    defaultMappedFile.ackUpLoadPosition(logicalIndex);
-                    // 成功后归还内存
-                    manager.recycleBlock(block);
-                } else {
-                    log.warn("instance={},bucket={}:Failed to upload this block=>{}", manager.instanceName, manager.bucketName, block);
-                    handleUploadFailure(block);
+                //只重试三次
+                boolean isSuccess = false;
+                for (int i = 0; i < 3; i++) {
+                    isSuccess = executeUpload(block);
+                    if (isSuccess) {
+                        //将元数据设置为上传成功
+                        manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
+                        //然后ack确认上传指针
+                        DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
+                        defaultMappedFile.ackUpLoadPosition(logicalIndex);
+                        // 成功后归还内存
+                        manager.recycleBlock(block);
+                        break;
+                    }
                 }
-            } catch (Throwable t) {
-                log.warn("Exception is={},instance={},bucket={}:Failed to upload this block=>{}", t, manager.instanceName, manager.bucketName, block);
+                //三次重试还不成功，抛出异常
+                if (isSuccess) {
+                    throw new CoreException("Failed to upload block");
+                }
+            } catch (Exception t) {
+                log.warn("Exception is={},instance={},bucket={},block=>{}", t, manager.instanceName, manager.bucketName, block);
                 handleUploadFailure(block);
             } finally {
                 // 4. 无论成功失败，释放令牌，让下一个块上云
@@ -113,8 +121,11 @@ public class CacheBlockUpdater {
      * 上传失败后执行
      */
     private void handleUploadFailure(CloudCacheBlock block) {
-        //将元数据设置为失败
-        manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex());
+        //将元数据设置为失败，并上传到私信队列中
+        CacheBlockManager cacheBlockManager = block.getManager();
+        DeadDataInfo deadDataInfo = new DeadDataInfo(cacheBlockManager.instanceName, cacheBlockManager.bucketName,
+                block.getFileFromOffset(), block.getLogicalIndex(), block.getS3Key());
+        manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex(), deadDataInfo);
     }
 
     public void close() throws Exception {

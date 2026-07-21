@@ -77,11 +77,16 @@ public class WalInstanceBucketManager {
         }
     }
 
+    //默认开始文件的起始位点为0
+    public MappedFileManager getOrCreateBucketFileManager(String bucketName) {
+        return this.getOrCreateBucketFileManager(bucketName, 0L);
+    }
+
 
     /**
-     * 根据bucket获取对应的MappedFileManager，没有则创建
+     * 自定义创建manager，manager从fromOffset位点开始创建文件
      */
-    public MappedFileManager getOrCreateBucketFileManager(String bucketName) {
+    public MappedFileManager getOrCreateBucketFileManager(String bucketName, long fromOffset) {
         MappedFileManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
             return manager;
@@ -97,9 +102,7 @@ public class WalInstanceBucketManager {
             }
             // 创建新的MappedFileManager
             String managerDirPath = File.separator + bucketName;
-            BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
-            BucketConfig realBucketConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
-            manager = new MappedFileManager(managerDirPath, instanceName, bucketName, realBucketConfig);
+            manager = new MappedFileManager(managerDirPath, instanceName, bucketName, config.getBucketConfig(bucketName), fromOffset);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {

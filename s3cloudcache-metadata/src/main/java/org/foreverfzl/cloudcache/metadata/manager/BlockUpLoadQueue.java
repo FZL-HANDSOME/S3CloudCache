@@ -2,16 +2,13 @@ package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 
-import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * 一部分上传任务会放入到这个类中队列中，core模块监听这个队列，如有新的任务则进行上传
  */
-public class BlockUpLoadQueueManager {
+public class BlockUpLoadQueue {
     /**
      * 上传任务队列
      */

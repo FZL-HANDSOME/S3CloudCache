@@ -1,15 +1,19 @@
 package org.foreverfzl.cloudcache.storage.instance.cloudcache;
 
 
+import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.global.CoreInstanceBucketManager;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
-import org.foreverfzl.cloudcache.wal.datastruct.MetaInfo;
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.CloudCacheException;
 import org.slf4j.Logger;
@@ -21,7 +25,6 @@ import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -29,11 +32,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.*;
 import java.util.stream.Stream;
 import java.util.zip.CRC32;
 
@@ -59,6 +59,9 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     private final CoreInstanceBucketManager coreInstanceBucketManager;
 
     private final S3Client s3Client;
+
+    //数据恢复线程池
+    private ExecutorService recoverExecutorService = null;
 
 
     public S3CloudCacheInstance(S3Client s3Client, S3CloudCacheConfig config) {
@@ -87,22 +90,22 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
 
     //start负责扫描目录、恢复数据等
     public void start() {
-        //检查指定目录下instanceName的所有目录和文件,方法结束后所有的东西都恢复到结束前的状态，并且recoverBucketsMap填写好
-        try (Stream<Path> bucketList = Files.list(Paths.get(config.walPath + File.separator + instanceName));) {
-            //遍历该instance下的所有bucket
-            bucketList.forEach(path -> {
-                try {
-                    this.chackDirectoryAndFile(path, path.getFileName().toString());
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
+        //1：检查指定目录下instanceName的所有目录和文件,方法结束后所有的东西都恢复到结束前的状态，并且recoverBucketsMap填写好
+        try (Stream<Path> list = Files.list(Paths.get(config.walPath + File.separator + instanceName))) {
+            List<Path> bucketPathList = list.toList();
+            int bucketCount = bucketPathList.size();
+            recoverExecutorService = Executors.newFixedThreadPool(bucketCount);
+            for (Path path : bucketPathList) {
+                String bucketName = path.getFileName().toString();
+                this.chackDirectoryAndFile(path, bucketName);
+            }
 
         } catch (Exception e) {
 
         }
     }
 
+    //恢复一个具体bucket中的数据
     private void chackDirectoryAndFile(Path path, String bucketName) throws IOException {
         if (path == null || !Files.exists(path)) {
             throw new CloudCacheException("bucket directory not exists: " + path);
@@ -110,9 +113,6 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         if (!Files.isDirectory(path)) {
             throw new CloudCacheException("path is not directory: " + path);
         }
-        //创建该bucket对应manager
-        MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
-        CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
 
         /*
          * 1.读取bucketMeta
@@ -141,13 +141,18 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
         //校验数据
         CRC32 crc32 = new CRC32();
+        crc32.update(Math.toIntExact(oldFileSize));
+        crc32.update(oldblockSize);
         crc32.update(dataLen);
         crc32.update(data);
-        if ((int) crc32.getValue() != crc) {
-            //如果不一样说明数据不正确
-            throw new CloudCacheException("An error occurred in the bucketMeta data. " + path);
-        }
         String oldPrefix = new String(data, StandardCharsets.UTF_8);
+        boolean out = false;
+        if ((int) crc32.getValue() != crc) {
+            //bucketMeta文件损坏，以前的文件无法恢复
+            log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", path);
+            out = true;
+        }
+
         /*
          * 2.扫描获取wal目录下的所有文件的绝对路径
          */
@@ -159,39 +164,104 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         try (Stream<Path> stream = Files.list(walPath)) {
             //根据文件名字进行排序
             List<Path> walFiles = stream.filter(Files::isRegularFile)
-                    .sorted(Comparator.comparingLong(this::parseWalFileOffset))
+                    .sorted(Comparator.comparingLong(this::getFileFromOffset))
                     .toList();
-            ByteBuffer temp = ByteBuffer.allocate(4 * 1024);
-            //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
-            for (Path curPath : walFiles) {
-                long fileFromOffset = Long.parseLong(curPath.getFileName().toString());
-                try (FileChannel fileChannel = FileChannel.open(curPath, StandardOpenOption.READ)) {
-                    fileChannel.read(temp);
-                    //获取该文件的读和上传指针
-                    long readPosition = temp.getLong();
-                    long upLoadPosition = temp.getLong();
-                    //然后创建文件，并且修改文件的指针状态
-                    DefaultMappedFile defaultMappedFile = fileManager.synCreateMappedFile(fileFromOffset);
-                    defaultMappedFile.wrotePosition = readPosition;
-                    defaultMappedFile.upLoadPosition = upLoadPosition;
-                } catch (IOException e) {
-                    log.warn("recovering=>{} file created failed", fileFromOffset, e);
+            long endFileFromOffset = getFileFromOffset(walFiles.getLast()) + oldFileSize;
+            //创建该bucket对应manager
+            MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
+            CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
+            if (out) {
+                //bucket元数据错误，不恢复以前的数据
+                return;
+            }
+            //这里创建新的CacheBlockManager专门进行数据恢复
+            String recoverBucketName = bucketName + "_" + "recover";
+            long cacheSize = 128 * 1024 * 1024L;
+            int blockUpLoadCount = (int) ProjectUtil.divideByPower(cacheSize, oldblockSize);
+            CacheBlockManager recoverBlockManager = coreInstanceBucketManager.getOrCreateBlockManager(recoverBucketName, fileManager.blockMetaDataManager,
+                    null, cacheSize, oldblockSize, blockUpLoadCount, false);
+            recoverExecutorService.execute(() -> {
+                recoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, oldPrefix);
+            });
+        } catch (Exception e) {
+
+        }
+    }
+
+    //恢复一个bucket中的文件
+    private void recoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager,
+                             long oldFileSize, int oldblockSize, String prefix) {
+        ByteBuffer temp = ByteBuffer.allocate(4 * 1024);
+        CRC32 crc32 = new CRC32();
+        //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
+        long curPos = 0;
+        long endPos = 0;
+        for (Path curPath : walFiles) {
+            long fileFromOffset = Long.parseLong(curPath.getFileName().toString());
+            try (FileChannel fileChannel = FileChannel.open(curPath, StandardOpenOption.READ)) {
+                fileChannel.read(temp);
+                //获取该文件的读和上传指针
+                long readPosition = temp.getLong();
+                long upLoadPosition = temp.getLong();
+                //清空缓冲区
+                temp.clear();
+                //然后创建文件，并且修改文件的指针状态
+                //(long fileFromOffset,long walFileSize,int blockSize,boolean isWarm,boolean isLock)
+                DefaultMappedFile defaultMappedFile = fileManager.synCreateMappedFile(fileFromOffset, oldFileSize, oldblockSize,
+                        false, false);
+                defaultMappedFile.wrotePosition = readPosition;
+                defaultMappedFile.readPosition = readPosition;
+                defaultMappedFile.upLoadPosition = upLoadPosition;
+                if (readPosition == upLoadPosition) {
+                    //文件没有数据可以恢复，标记为删除，并且清除资源，由专门的线程去删除文件
+                    defaultMappedFile.close();
+                    defaultMappedFile.clean();
+                    continue;
                 }
+                //需要数据恢复的文件，读取文件指定区域数据进行恢复
+                curPos = upLoadPosition;
+                int blockCount = (int) ProjectUtil.divideByPower((readPosition - upLoadPosition), oldblockSize);
+                //获取元数据管路者
+                BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
+                for (int i = 1; i <= blockCount; i++) {
+                    endPos = curPos + oldblockSize;
+                    int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(curPos, oldblockSize));
+                    //因为咱们是数据恢复，因此该block元数据一定是封口状态
+                    blockMetaDataManager.addExpectedBytes(defaultMappedFile.fileFromOffset, blockIndex, oldblockSize);
+                    blockMetaDataManager.trySeal(defaultMappedFile.fileFromOffset, blockIndex);
+                    //如果可以读int并且是正常数据则读取
+                    //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
+                    while (endPos - curPos >= 4 && defaultMappedFile.getInt(curPos) == DataStruct.MAGIC_NUMBER) {
+                        curPos += 4;
+                        int checksum = defaultMappedFile.getInt(curPos);
+                        curPos += 4;
+                        int valueLen = defaultMappedFile.getInt(curPos);
+                        curPos += 4;
+                        byte[] orgData = defaultMappedFile.getOrgData(curPos, valueLen);
+                        crc32.update(orgData);
+                        if ((int) crc32.getValue() != checksum) {
+                            //数据错误直接退出
+                            break;
+                        }
+                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, fileFromOffset, blockIndex, orgData, 0, valueLen), prefix);
+                        crc32.reset();
+                    }
+                    //该block数据结束了，将该block上传
+                    blockMetaDataManager.addFinishedBytes(defaultMappedFile.fileFromOffset, blockIndex, oldblockSize);
+                    CloudCacheBlock block = recoverBlockManager.getExistingBlock(defaultMappedFile.fileFromOffset, blockIndex);
+                    recoverBlockManager.updateBlock(block);
+                    curPos = upLoadPosition + ((long) i * oldblockSize);
+                }
+            } catch (IOException e) {
+                log.warn("recovering=>{} file created failed", fileFromOffset, e);
             }
         }
-
-
     }
 
-    private long parseWalFileOffset(Path path) {
-        // path 是 /data/bucket-1/wal/1000
-        // getFileName() 获取 1000
-        // toString() 转为 "1000"
-        // Long.parseLong() 解析为 1000L
-        String fileName = path.getFileName().toString();
-        return Long.parseLong(fileName);
-    }
 
+    private long getFileFromOffset(Path path) {
+        return Long.parseLong(path.getFileName().toString());
+    }
 
     //todo 关闭资源
     public void close() {

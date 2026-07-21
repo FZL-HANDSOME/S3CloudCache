@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
@@ -16,9 +17,11 @@ public class BlockMetaDataManager {
     //key为fileFromOffset+blockIndex
     private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
     //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
-    private final BlockUpLoadQueueManager blockUpLoadQueueManager = new BlockUpLoadQueueManager();
-
-    private final BlockRecoverQueueManager blockRecoverQueueManager = new BlockRecoverQueueManager();
+    private final BlockUpLoadQueue blockUpLoadQueue = new BlockUpLoadQueue();
+    //存放物理block写入失败，读取wal文件重新恢复的信息
+    private final BlockRecoverQueue blockRecoverQueue = new BlockRecoverQueue();
+    //存放物理block上传不上去的数据
+    private final DeadDataQueue deadDataQueue = new DeadDataQueue();
 
     public BlockMetaDataManager() {
 
@@ -41,22 +44,21 @@ public class BlockMetaDataManager {
         }
         //封口然后放入到上传队列中
         blockMetaData.trySeal();
-        blockUpLoadQueueManager.submit(new UploadTask(fileFromOffset, blockIndex));
+        blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
+    }
+
+    public DeadDataInfo getDeadDataInfo() throws InterruptedException{
+        return deadDataQueue.take();
     }
 
     public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
-        return blockUpLoadQueueManager.take();
+        return blockUpLoadQueue.take();
     }
 
     public RecoverTask getTaskFromRecoverQueue() throws InterruptedException {
-        return blockRecoverQueueManager.take();
+        return blockRecoverQueue.take();
     }
 
-    //将对应的元数据设置为Broke
-    public void setMetaDataBroken(long fileFromOffset, int blockIndex) {
-        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
-        blockMetaData.setBroken();
-    }
 
     /**
      * 获取或者创建BlockMetaData
@@ -100,9 +102,31 @@ public class BlockMetaDataManager {
      */
     public void trySeal(long fileFromOffset, int blockIndex) {
         BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
-        boolean b = blockMetaData.trySeal();
-        if (b && blockMetaData.isBroken()) {
-            blockRecoverQueueManager.submit(new RecoverTask(fileFromOffset, blockIndex));
+        boolean trySeal = false;
+        synchronized (this) {
+            if (blockMetaData.getState() == BlockMetaData.SEALED) {
+                return;
+            }
+            //seal和broken状态存在竞争关系
+            trySeal = blockMetaData.trySeal();
+        }
+        //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
+        if (trySeal && blockMetaData.isBroken()) {
+            blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+        }
+    }
+
+    //将对应的元数据设置为Broke
+    public void setMetaDataBroken(long fileFromOffset, int blockIndex) {
+        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
+        synchronized (this) {
+            if (blockMetaData.isBroken()) {
+                return;
+            }
+            blockMetaData.setBroken();
+        }
+        if (blockMetaData.getState() == BlockMetaData.SEALED) {
+            blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
         }
     }
 
@@ -125,8 +149,9 @@ public class BlockMetaDataManager {
     /**
      * CAS改为上传失败
      */
-    public void markUploadFailed(long fileFromOffset, int blockIndex) {
-        get(fileFromOffset, blockIndex).markUploadFailed();
+    public void markUploadFailed(long fileFromOffset, int blockIndex, DeadDataInfo deadDataInfo) {
+        this.remove(fileFromOffset, blockIndex);
+        deadDataQueue.submit(deadDataInfo);
     }
 
     /**
@@ -152,8 +177,7 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1
-                && metaData.getExpectedBytes() == metaData.getFinishedBytes();
+        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getFinishedBytes();
     }
 
 }

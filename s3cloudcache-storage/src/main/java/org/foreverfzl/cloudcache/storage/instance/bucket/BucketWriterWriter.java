@@ -3,6 +3,7 @@ package org.foreverfzl.cloudcache.storage.instance.bucket;
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.WriteResult;
@@ -89,6 +90,12 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     public WriteResult write(ByteBuffer buffer, long offset, long length) {
 
         return null;
+    }
+
+    //监听死信队列的数据
+    @Override
+    public DeadDataInfo getDeadDataInfo() throws InterruptedException {
+        return blockMetaDataManager.getDeadDataInfo();
     }
 
     private void getBlockBroken() {

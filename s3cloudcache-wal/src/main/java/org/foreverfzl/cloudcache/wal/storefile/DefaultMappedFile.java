@@ -244,59 +244,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     /**
-     * 从该文件中读取指定区域的数据，并反序列化为 WalDataStruct 对象。
-     */
-    public WalDataStruct getData(long readOffset, long size) {
-        // 边界检查：确保读取范围不超过已写入区域
-        long curReadPosition = READ_POSITION_UPDATER.get(this);
-        if (readOffset + size > curReadPosition) {
-            log.warn("getData: read range [{}, {}) exceeds wrotePosition {}, fileName={}",
-                    readOffset, readOffset + size, curReadPosition, fileName);
-            return null;
-        }
-
-        try {
-            // 2. 切片出目标区域，与 doAppend 对称，slice 内部偏移从 0 开始
-            MemorySegment slice = mappedMemorySegment.asSlice(readOffset, size);
-            long pos = 0;
-
-            int magic = slice.get(JAVA_INT, pos);
-            pos += 4;
-
-            int checksum = slice.get(JAVA_INT, pos);
-            pos += 4;
-
-            int valueLen = slice.get(JAVA_INT, pos);
-            pos += 4;
-
-            // 3. 校验魔数
-            if (magic != WalDataStruct.MAGIC_NUMBER) {
-                log.warn("getData: invalid magic number 0x{} at readOffset={}, fileName={}",
-                        Long.toHexString(magic), readOffset, fileName);
-                return null;
-            }
-
-            // 批量拷贝 Value 字节数组
-            byte[] valueBytes = new byte[valueLen];
-            MemorySegment.copy(
-                    slice,
-                    ValueLayout.JAVA_BYTE,
-                    pos,
-                    valueBytes,
-                    0,
-                    valueLen
-            );
-            // 7. 构造 WalDataStruct 并返回（构造方法内含 CRC32 校验逻辑）
-            return new WalDataStruct(magic, checksum, 0, valueLen, valueBytes);
-        } catch (Exception e) {
-            log.error("getData: failed to read data from file={}, readOffset={}, size={}",
-                    fileName, readOffset, size, e);
-            return null;
-        }
-    }
-
-
-    /**
      * 往该文件中追加数据（并发安全）。
      * <p>
      * 流程：
@@ -444,6 +391,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             mappedMemorySegment = null;
             file = null;
             upLoadEndOffset = null;
+            this.setClean();
         } catch (Exception e) {
             log.warn("{} file clean failed", this.fileFromOffset, e);
         }

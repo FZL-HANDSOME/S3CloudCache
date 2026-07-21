@@ -34,6 +34,8 @@ public class MappedFileManager {
     private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
     public final String instanceName;
     public final String bucketName;
+    //从这个位点开始创建文件
+    private final long fromOffset;
 
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
@@ -81,11 +83,13 @@ public class MappedFileManager {
     private Thread fileMetaFlushThread;
 
 
-    public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config) {
+    public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config,long fromOffset) {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         this.dirPath = dirPath;
+        this.fromOffset = fromOffset;
         this.config = config;
+        this.globalUpLoadPosition = fromOffset;
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
@@ -99,15 +103,16 @@ public class MappedFileManager {
         init();
     }
 
+
     //启动线程，创建初始文件等
     private void init() {
 //        flushFileUpLoadPositionThread.start();
 //        chackMappedFileThread.start();
 //        fileMetaFlushThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
-        synCreateMappedFile(0L);
-        activeMappedFile.compareAndSet(null, mappedFiles.get(0L));
-        upLoadActiveMappedFile.compareAndSet(null, mappedFiles.get(0L));
+        DefaultMappedFile startFile = synCreateMappedFile(fromOffset);
+        activeMappedFile.compareAndSet(null, startFile);
+        upLoadActiveMappedFile.compareAndSet(null, startFile);
     }
 
     //todo 将数据添加到指定文件，如果文件满了则获取新的文件进行写，如果是其它错误则分情况而论
@@ -125,7 +130,7 @@ public class MappedFileManager {
                 oldMappedFile.close();
                 //获取最新的写文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
-                DefaultMappedFile newFile=synCreateMappedFile(nextFileOffset);
+                DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
                 if (newFile != null) {
                     activeMappedFile.compareAndSet(oldMappedFile, newFile);
                     //然后使用新的文件进行写
@@ -149,10 +154,17 @@ public class MappedFileManager {
         });
     }
 
+
     /**
-     * 同步创建新的文件并放入到容器中
+     * 同步创建新的文件并放入到容器中（默认使用配置文件 创建文件）
      */
     public DefaultMappedFile synCreateMappedFile(long fileFromOffset) {
+        return synCreateMappedFile(fileFromOffset, config.walFileSize, config.blockSize, config.isWarmWalFile, config.isLockMappedFilePageCache);
+    }
+
+
+    //自定义创建文件
+    public DefaultMappedFile synCreateMappedFile(long fileFromOffset, long walFileSize, int blockSize, boolean isWarm, boolean isLock) {
         String fileName = String.valueOf(fileFromOffset);
         //这里水位线线程 和 其它线程可能出现冲突，同时创建文件，需要加锁
         synchronized (fileName.intern()) {
@@ -163,8 +175,8 @@ public class MappedFileManager {
                     return defaultMappedFile;
                 }
                 DefaultMappedFile newFile = null;
-                newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, config.walFileSize,
-                        config.blockSize, config.isWarmWalFile, config.isLockMappedFilePageCache, this);
+                newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, walFileSize,
+                        blockSize, isWarm, isLock, this);
                 //文件为null有可能其它线程已经创建了文件了
                 if (newFile == null) {
                     return null;
@@ -176,7 +188,6 @@ public class MappedFileManager {
                         e, instanceName, bucketName, fileName);
                 throw e;
             }
-
         }
     }
 

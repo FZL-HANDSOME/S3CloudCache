@@ -42,6 +42,8 @@ public class MetaInfo {
      */
     public void updateCrc() {
         CRC32 crc32 = new CRC32();
+        crc32.update(Math.toIntExact(this.fileSize));
+        crc32.update(this.blockSize);
         crc32.update(dataLen);
         crc32.update(data);
         this.crc = (int) crc32.getValue();

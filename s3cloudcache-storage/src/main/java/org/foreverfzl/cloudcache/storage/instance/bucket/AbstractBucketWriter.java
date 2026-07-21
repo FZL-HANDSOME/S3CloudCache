@@ -1,5 +1,6 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
+import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.storage.instance.WriteResult;
 
 import java.nio.ByteBuffer;
@@ -37,4 +38,6 @@ public abstract class AbstractBucketWriter implements Writer {
      * @return
      */
     public abstract WriteResult write(ByteBuffer buffer, long offset, long length);
+
+    public abstract DeadDataInfo getDeadDataInfo() throws InterruptedException;
 }

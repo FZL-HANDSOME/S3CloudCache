@@ -47,33 +47,37 @@ public class CacheBlockManager {
 
     //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
     private volatile boolean active = true;
-    private final Thread getBlockUpLoadQueueTaskThread;
+    private Thread getBlockUpLoadQueueTaskThread;
 
-    public CacheBlockManager(String instanceName, String bucketName, BlockMetaDataManager blockMetaDataManager, S3Client s3Client, BucketConfig config) {
+    public CacheBlockManager(String instanceName, String bucketName, BlockMetaDataManager blockMetaDataManager,
+                             S3Client s3Client, BucketConfig config, long cacheSize, int cacheBlockSize,
+                             int blockUpLoadCount, boolean isCreateThread) {
         this.config = config;
-        this.blockCount = (int) (config.cacheSize / config.blockSize);
+        this.blockCount = (int) (cacheSize / cacheBlockSize);
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         // 1. 创建 MemorySegment 堆外缓冲区
         this.arena = Arena.ofShared();
-        this.globalMemorySegment = arena.allocate(config.cacheSize);
+        this.globalMemorySegment = arena.allocate(cacheSize);
         this.freeBlocks = new ArrayBlockingQueue<>(blockCount);
         this.keyBlockMap = new ConcurrentHashMap<>();
-        this.blockUpdater = new CacheBlockUpdater(this, config.blockUpLoadCount, s3Client, config.enableHeadCheck);
+        this.blockUpdater = new CacheBlockUpdater(this, blockUpLoadCount, s3Client, config.enableHeadCheck);
         this.blockMetaDataManager = blockMetaDataManager;
-        this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
         // 2. 初始化并维护所有的 CloudCacheBlock
         for (int i = 0; i < blockCount; i++) {
-            long offset = (long) i * config.blockSize;
-            CloudCacheBlock block = new CloudCacheBlock(offset, config.blockSize, globalMemorySegment.asSlice(offset, config.blockSize), this);
+            long offset = (long) i * cacheBlockSize;
+            CloudCacheBlock block = new CloudCacheBlock(offset, cacheBlockSize, globalMemorySegment.asSlice(offset, cacheBlockSize), this);
             freeBlocks.add(block);
         }
         for (int i = 0; i < blockLocks.length; i++) {
             blockLocks[i] = new Object();
         }
-        getBlockUpLoadQueueTaskThread.start();
+        if (isCreateThread) {
+            this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
+            this.getBlockUpLoadQueueTaskThread.start();
+        }
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
-                config.cacheSize, config.blockSize, blockCount, config.blockUpLoadCount);
+                cacheSize, cacheBlockSize, blockCount, blockUpLoadCount);
     }
 
 
@@ -90,10 +94,14 @@ public class CacheBlockManager {
                     blockUpdater.upLoadBlock(cacheBlock);
                 }
             } catch (InterruptedException e) {
-                active=false;
+                active = false;
                 throw new RuntimeException(e);
             }
         }
+    }
+
+    public AppendDataResult appendData(BlockDataStruct dataStruct) {
+        return this.appendData(dataStruct, config.s3KeyPrefix);
     }
 
     /**
@@ -102,7 +110,7 @@ public class CacheBlockManager {
      * @param dataStruct 数据
      * @return 结果
      */
-    public AppendDataResult appendData(BlockDataStruct dataStruct) {
+    public AppendDataResult appendData(BlockDataStruct dataStruct, String prefix) {
         CloudCacheBlock cacheBlock = null;
         long curWritePosition = 0;
         int size = 0;
@@ -110,7 +118,7 @@ public class CacheBlockManager {
         int blockIndex = dataStruct.getBlockIndex();
         try {
             size = dataStruct.getDataLen();
-            cacheBlock = getBlock(fileFromOffset, blockIndex);
+            cacheBlock = getBlock(fileFromOffset, blockIndex, prefix);
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
@@ -148,11 +156,15 @@ public class CacheBlockManager {
         blockUpdater.upLoadBlock(cacheBlock);
     }
 
+    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
+        return this.getBlock(fileFromOffset, blockIndex, config.s3KeyPrefix);
+    }
+
     /**
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
-    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
+    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex, String prefix) throws InterruptedException {
         long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
@@ -167,12 +179,17 @@ public class CacheBlockManager {
             }
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
-            block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
+            block.setS3Key(ProjectUtil.generateUniqueS3Key(prefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
             block.setFileFromOffset(fileFromOffset);
             block.setLogicalIndex(blockIndex);
             keyBlockMap.put(cacheBlockKey, block);
             return block;
         }
+    }
+
+
+    public CloudCacheBlock getExistingBlock(long fileFromOffset, int blockIndex) {
+        return keyBlockMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
     /**
@@ -220,4 +237,5 @@ public class CacheBlockManager {
     public String getInstanceName() {
         return instanceName;
     }
+
 }

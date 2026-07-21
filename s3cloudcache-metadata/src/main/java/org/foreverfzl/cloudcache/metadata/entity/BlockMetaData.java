@@ -30,8 +30,8 @@ public class BlockMetaData {
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile int finishedBytes;
     private volatile long lastActiveTime;
-    //如果isBroken为true代表该物理block写入数据时产生错误了
     private volatile boolean isBroken;
+
 
     static {
         STATE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "state");
@@ -65,6 +65,7 @@ public class BlockMetaData {
     public boolean markUploadFailed() {
         return STATE_UPDATER.compareAndSet(this, UPLOADING, FAILED);
     }
+
 
     //尝试将Block设置为上传中，一般重试上传的时候会用
     public boolean retryUpload() {
@@ -109,11 +110,11 @@ public class BlockMetaData {
         return lastActiveTime;
     }
 
-    public void setBroken() {
-        isBroken = true;
-    }
-
     public boolean isBroken() {
         return isBroken;
+    }
+
+    public void setBroken() {
+        isBroken = true;
     }
 }

@@ -38,10 +38,17 @@ public class CoreInstanceBucketManager {
     }
 
 
+    public CacheBlockManager getOrCreateBlockManager(String bucketName, BlockMetaDataManager blockMetaDataManager) {
+        BucketConfig bucketConfig = config.getBucketConfig(bucketName);
+        return this.getOrCreateBlockManager(bucketName, blockMetaDataManager, bucketConfig, bucketConfig.cacheSize,
+                bucketConfig.blockSize, bucketConfig.blockUpLoadCount, true);
+    }
+
     /**
      * 根据bucket获取对应的BlockManager
      */
-    public CacheBlockManager getOrCreateBlockManager(String bucketName, BlockMetaDataManager blockMetaDataManager) {
+    public CacheBlockManager getOrCreateBlockManager(String bucketName, BlockMetaDataManager blockMetaDataManager, BucketConfig bucketConfig,
+                                                     long cacheSize, int cacheBlockSize, int blockUpLoadCount, boolean isCreateThread) {
         // 第一次无锁查询
         CacheBlockManager manager = managerHashMap.get(bucketName);
         if (manager != null) {
@@ -56,10 +63,9 @@ public class CoreInstanceBucketManager {
             if (manager != null) {
                 return manager;
             }
-            // 创建新的BlockManager
-            BucketConfig bucketConfig = config.specialBuckets.get(bucketName);
-            BucketConfig realConfig = bucketConfig != null ? bucketConfig : config.defaultBucketConfig;
-            manager = new CacheBlockManager(instanceName, bucketName, blockMetaDataManager, s3Client, realConfig);
+            if (bucketConfig == null) bucketConfig = config.getBucketConfig(bucketName);
+            manager = new CacheBlockManager(instanceName, bucketName, blockMetaDataManager, s3Client, bucketConfig,
+                    cacheSize, cacheBlockSize, blockUpLoadCount, isCreateThread);
             managerHashMap.put(bucketName, manager);
             return manager;
         } finally {
@@ -72,7 +78,7 @@ public class CoreInstanceBucketManager {
         return locks[bucketName.hashCode() & (LOCKS_COUNT - 1)];
     }
 
-    public void close(){
+    public void close() {
 
     }
 }
