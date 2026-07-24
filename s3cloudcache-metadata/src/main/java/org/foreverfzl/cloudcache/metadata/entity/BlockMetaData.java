@@ -25,10 +25,15 @@ public class BlockMetaData {
 
     private static final AtomicIntegerFieldUpdater<BlockMetaData> STATE_UPDATER;
     private volatile int state;
-    private static final AtomicIntegerFieldUpdater<BlockMetaData> EXPECTED_BYTES_UPDATER;
+    //expectedBytes代表该逻辑block期望的字节数
     private volatile int expectedBytes;
-    private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
+    private static final AtomicIntegerFieldUpdater<BlockMetaData> EXPECTED_BYTES_UPDATER;
+    //pageCacheBytes代表该逻辑block写入到操作系统PageCache的字节数
+    private volatile int pageCacheBytes;
+    private static final AtomicIntegerFieldUpdater<BlockMetaData> PAGE_CACHE_BYTES_UPDATER;
+    //finishedBytes代表物理Block真正写入字节数
     private volatile int finishedBytes;
+    private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile long lastActiveTime;
     private volatile boolean isBroken;
 
@@ -36,6 +41,7 @@ public class BlockMetaData {
     static {
         STATE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "state");
         EXPECTED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "expectedBytes");
+        PAGE_CACHE_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "pageCacheBytes");
         FINISHED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "finishedBytes");
     }
 
@@ -45,6 +51,7 @@ public class BlockMetaData {
         this.finishedBytes = 0;
         this.lastActiveTime = System.currentTimeMillis();
     }
+
 
     //尝试将Block设置为封口
     public boolean trySeal() {
@@ -72,6 +79,16 @@ public class BlockMetaData {
         return STATE_UPDATER.compareAndSet(this, FAILED, UPLOADING);
     }
 
+
+    public void addPageCacheBytes(int val) {
+        int current;
+        int next;
+        do {
+            current = PAGE_CACHE_BYTES_UPDATER.get(this);
+            next = current + val;
+        } while (!PAGE_CACHE_BYTES_UPDATER.compareAndSet(this, current, next));
+    }
+
     public void addExpectedBytes(int val) {
         int current;
         int next;
@@ -92,6 +109,10 @@ public class BlockMetaData {
 
     public void updateLastTime() {
         this.lastActiveTime = System.currentTimeMillis(); //这里可以容纳误差，简单赋值即可
+    }
+
+    public int getPageCacheBytes() {
+        return pageCacheBytes;
     }
 
     public int getFinishedBytes() {

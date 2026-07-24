@@ -47,7 +47,7 @@ public class BlockMetaDataManager {
         blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
     }
 
-    public DeadDataInfo getDeadDataInfo() throws InterruptedException{
+    public DeadDataInfo getDeadDataInfo() throws InterruptedException {
         return deadDataQueue.take();
     }
 
@@ -82,12 +82,27 @@ public class BlockMetaDataManager {
     }
 
     /**
+     * 增加写入到PageCache的字节数，如果PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
+     * 该方法返回true则代表可以将对应文件的对应block设置为1(可以刷新状态)
+     */
+    public boolean addPageCacheBytes(long fileFromOffset, int blockIndex, int bytes) {
+        BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
+        blockMetaData.addPageCacheBytes(bytes);
+        blockMetaData.updateLastTime();
+        //如果该block封口了并且全部数据写入到PageCache中
+        if (blockMetaData.getState() == BlockMetaData.SEALED
+                && blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
      * 增加期待写入字节数
      */
     public void addExpectedBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
         blockMetaData.addExpectedBytes(bytes);
-        blockMetaData.updateLastTime();
     }
 
     /**
@@ -177,7 +192,7 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getFinishedBytes();
+        return metaData.getState() == 1 && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
     }
 
 }

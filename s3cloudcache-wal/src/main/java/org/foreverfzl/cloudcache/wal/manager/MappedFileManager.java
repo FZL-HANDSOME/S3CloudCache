@@ -82,8 +82,12 @@ public class MappedFileManager {
     //刷新文件元数据的线程，将文件的各个信息写入到对应文件的开头4KB
     private Thread fileMetaFlushThread;
 
+    //刷新所有文件的读指针，默认5S
+    private final int flushReadPositionTime = 5000;
+    private Thread flushFileReadPositionThread;
 
-    public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config,long fromOffset) {
+
+    public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config, long fromOffset) {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         this.dirPath = dirPath;
@@ -100,6 +104,7 @@ public class MappedFileManager {
         this.flushFileUpLoadPositionThread = new Thread(this::flushUpLoadPositionTask);
         this.chackMappedFileThread = new Thread(this::chackMappedFileTask);
         this.fileMetaFlushThread = new Thread(this::flushFileMeta);
+        this.flushFileReadPositionThread = new Thread(this::flushReadPositionTask);
         init();
     }
 
@@ -127,7 +132,6 @@ public class MappedFileManager {
             result = oldMappedFile.appendData(dataStruct);
             //只要写没成功，关闭文件创建新的文件重试
             if (!result.isOk()) {
-                oldMappedFile.close();
                 //获取最新的写文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
                 DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
@@ -189,6 +193,31 @@ public class MappedFileManager {
                 throw e;
             }
         }
+    }
+
+
+    private void flushReadPositionTask() {
+        while (active) {
+            try {
+                //获取全局上传指针之前的所有文件
+                Collection<DefaultMappedFile> values = mappedFiles.values();
+                if (!values.isEmpty()) {
+                    for (DefaultMappedFile file : values) {
+                        if (file.isCleanup()) continue;
+                        file.ackReadPosition();
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("flushReadPositionTask failed", e);
+            }
+            try {
+                Thread.sleep(flushReadPositionTime);
+            } catch (Exception e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
     }
 
     //刷新全局文件的上传指针
@@ -315,7 +344,7 @@ public class MappedFileManager {
         while (active) {
             for (Map.Entry<Long, DefaultMappedFile> entry : mappedFiles.entrySet()) {
                 DefaultMappedFile mappedFile = entry.getValue();
-                if (!mappedFile.metaDirty) {
+                if (DefaultMappedFile.DIRTY_UPDATER.get(mappedFile) == 0) {
                     //如果不是脏数据则直接跳过
                     continue;
                 }
@@ -334,6 +363,9 @@ public class MappedFileManager {
                     metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
                     // Ensure durability.
                     metaSegment.force();
+                    if (mappedFile.fileFromOffset == readPos && mappedFile.upLoadPosition == uploadPos) {
+                        DefaultMappedFile.DIRTY_UPDATER.compareAndSet(mappedFile, 1, 0);
+                    }
                 } catch (Exception e) {
                     log.warn("flushFileMeta: failed to write meta for {}file offset ", mappedFile.getFileName(), e);
                 }

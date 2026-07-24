@@ -3,7 +3,6 @@ package org.foreverfzl.cloudcache.wal.storefile;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
@@ -38,6 +37,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> IS_CREATE_NEW_FILE;
 
+
     public volatile long fileFromOffset;
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
@@ -55,16 +55,24 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected Arena arena;
     protected MemorySegment mappedMemorySegment; //本质是MMP内存映射
 
-
-    //Block、upLoadPosition更新相关
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
     protected int blockSize;
-    protected long[] upLoadEndOffset; //upLoadPosition指针更新辅助数组指针更新辅助数组
-    protected AtomicInteger nextUploadBlockIndex = new AtomicInteger(0); //upLoadPosition指针期望下次更新index
+
+    //blockStateArray[] 为0代表该block啥也不是，1代表该block数据全部写入到PageCache中，3代表该block已经上传到服务器
+    protected short[] blockStateArray;
     //引入数组元素的 VarHandle，用于消灭原生数组的内存可见性缺陷
-    private static final VarHandle ARRAY_ELEMENT_HANDLE;
-    //如果该文件的指针更新了该属性会被设置为true，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为false;
-    public volatile boolean metaDirty;
+    private static final VarHandle SHORT_ARRAY_HANDLE;
+
+    protected volatile int nextUploadBlockIndex = 0; //upLoadPosition指针期望下次更新index
+    public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_UPLOAD_INDEX_UPDATER;
+
+    protected volatile int readBlockIndex = 0; //readPosition指针期望下次更新index
+    protected volatile int forceSize = 8 * 1024 * 1024;
+    public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_READ_INDEX_UPDATER;
+
+    //如果该文件的指针更新了该属性会被设置为1，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为0;
+    public volatile int metaDirty;
+    public static final AtomicIntegerFieldUpdater<DefaultMappedFile> DIRTY_UPDATER;
 
 
     static {
@@ -72,8 +80,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
         READ_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "readPosition");
         UPLOAD_POSITION_UPDATER = AtomicLongFieldUpdater.newUpdater(DefaultMappedFile.class, "upLoadPosition");
         IS_CREATE_NEW_FILE = AtomicIntegerFieldUpdater.newUpdater(DefaultMappedFile.class, "isCreateNewFile");
+        DIRTY_UPDATER = AtomicIntegerFieldUpdater.newUpdater(DefaultMappedFile.class, "metaDirty");
+        NEXT_UPLOAD_INDEX_UPDATER = AtomicIntegerFieldUpdater.newUpdater(DefaultMappedFile.class, "nextUploadBlockIndex");
+        NEXT_READ_INDEX_UPDATER = AtomicIntegerFieldUpdater.newUpdater(DefaultMappedFile.class, "readBlockIndex");
         // 初始化原生 long[] 数组的元素句柄
-        ARRAY_ELEMENT_HANDLE = MethodHandles.arrayElementVarHandle(long[].class);
+        SHORT_ARRAY_HANDLE = MethodHandles.arrayElementVarHandle(short[].class);
     }
 
 
@@ -86,9 +97,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.blockSize = blockSize;
         this.file = file;
         this.manager = manager;
-        this.metaDirty = false;
+        this.metaDirty = 1;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
-        upLoadEndOffset = new long[totalBlockCount];
+        blockStateArray = new short[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
         init(isWarm, isLockMemory);
     }
@@ -146,43 +157,76 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
+
+    /**
+     * 推进read指针的更新
+     */
+    public void ackReadPosition() {
+        while (true) {
+            int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
+            if (curReadBlockIndex == totalBlockCount) {
+                break;
+            }
+            short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, curReadBlockIndex);
+            //看看状态是不是1，也就是数据全部落入到PageCache中
+            if (state == 0 || state == 3) {
+                break;
+            }
+            long curReadPosition = READ_POSITION_UPDATER.get(this);
+            long expectedNewPosition = (long) (curReadBlockIndex + 1) * blockSize;
+            //然后开始force刷盘
+            int count = (int) ProjectUtil.divideByPower(blockSize, forceSize);
+            MemorySegment target = null;
+            long curPos = curReadPosition;
+            for (int i = 0; i < count; i++) {
+                target = mappedMemorySegment.asSlice(curPos, fileSize);
+                target.force();
+                curPos += fileSize;
+            }
+            if (READ_POSITION_UPDATER.compareAndSet(this, curReadPosition, expectedNewPosition)) {
+                if (metaDirty == 0) DIRTY_UPDATER.compareAndSet(this, 0, 1);
+                // CAS 成功，原子递增索引
+                NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
+                continue;
+            } else {
+                break;
+            }
+        }
+    }
+
     /**
      * 物理和逻辑Block解耦 + 无锁账本 推进 upLoadPosition指针，该方法只是将预期结果填到坑里面，有专门的线程去检查指针
      *
      * @param logicalIndex 当前完成上传的 Block 在本文件内部的逻辑序号 (0, 1, 2...)
      */
     public void ackUpLoadPosition(int logicalIndex) {
-        // 边界防御：防止脏数据引发数组越界
-        if (logicalIndex < 0 || logicalIndex >= totalBlockCount) {
-            log.error("Invalid logical index: {}, totalBlockCount: {}", logicalIndex, totalBlockCount);
-            return;
-        }
         // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
-        ARRAY_ELEMENT_HANDLE.setVolatile(this.upLoadEndOffset, logicalIndex, (long) (logicalIndex + 1) * blockSize);
+        SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 3);
         //每个线程都去看一下是否能进行更新
         while (true) {
             // 在循环外固定当前要检查的索引
-            int currentIndex = nextUploadBlockIndex.get();
+            int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
+            //如果越界了则代表该文件都更新完了，退出
+            if (currentIndex == totalBlockCount) {
+                break;
+            }
             // 检查当前索引位置是否已填坑
-            long offset = (long) ARRAY_ELEMENT_HANDLE.getVolatile(this.upLoadEndOffset, currentIndex);
-            if (offset == 0) {
+            short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, currentIndex);
+            if (state == 0 || state == 1) {
                 // 当前 block 还没上传完，无法推进
                 break;
             }
             // 尝试原子推进上传指针
             long curUpLoadPosition = UPLOAD_POSITION_UPDATER.get(this);
-            long expectedNewPosition = offset; // 或者 upLoadEndOffset[currentIndex]
-            if (curUpLoadPosition == expectedNewPosition) {
-                // 已经推进过了，跳出循环
-                break;
-            }
+            long expectedNewPosition = (long) (currentIndex + 1) * blockSize;
             if (UPLOAD_POSITION_UPDATER.compareAndSet(this, curUpLoadPosition, expectedNewPosition)) {
+                if (metaDirty == 0) DIRTY_UPDATER.compareAndSet(this, 0, 1);
                 // CAS 成功，原子递增索引
-                nextUploadBlockIndex.incrementAndGet();
+                NEXT_UPLOAD_INDEX_UPDATER.incrementAndGet(this);
+                continue;
             } else {
                 break;
             }
-
         }
     }
 
@@ -257,7 +301,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final DataStruct dataStruct) {
-        if (!isAvailable()) return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+        if (!isAvailable())
+            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
@@ -277,17 +322,20 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
                 paddingPos = currentPos + remainingInBlock;
                 //看看文件是否结尾
-                if (paddingPos == this.fileSize) {
-                    manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
-                    close(); //关闭文件
-                    return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
-                }
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
                     manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     //padding至少4字节，如果少于4字节不做padding
                     if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
+                    //将对应blockIndex位置设置为在pageCache中
+                    SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 1);
+                    //如果是文件结尾则直接返回
+                    if (paddingPos == this.fileSize) {
+                        manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
+                        close(); //关闭文件
+                        return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                    }
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
                     continue;
                 }
@@ -314,6 +362,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // CAS失败，提示CPU这是spin等待
             Thread.onSpinWait();
         }
+        int dataSize = dataStruct.getDataLen();
+        //增加期望字节数
+        manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataSize);
         //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
         if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
             manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
@@ -322,10 +373,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
         //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
         AppendMessageResult result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
         if (result.isOk()) {
-            this.metaDirty = true;
-            //增加对应Block的期望字节数
             result.setLogicalIndex(logicalIndex);
-            manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataStruct.getDataLen());
+            //写入成功，增加写入到PageCache字节数
+            if (manager.blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize)) {
+                SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 1);
+            }
         }
         return result;
     }
@@ -350,10 +402,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
-            //真正写的时候再去看看文件是否可写
-            if (!isAvailable()) {
-                return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
-            }
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
@@ -366,7 +414,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         } catch (Exception e) {
             log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}",
                     writeOffset, size, fileName, e);
-            return AppendMessageResult.fail(this,AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
+            //出现异常关闭文件
+            this.close();
+            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
         }
     }
 
@@ -390,7 +440,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             }
             mappedMemorySegment = null;
             file = null;
-            upLoadEndOffset = null;
+            blockStateArray = null;
             this.setClean();
         } catch (Exception e) {
             log.warn("{} file clean failed", this.fileFromOffset, e);
@@ -437,7 +487,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     //返回true则代表还会继续更新upLoad指针
     public boolean isContinueUpdateUpLoadPosition() {
-        return nextUploadBlockIndex.get() != totalBlockCount;
+        return NEXT_UPLOAD_INDEX_UPDATER.get(this) != totalBlockCount;
     }
 
 }
