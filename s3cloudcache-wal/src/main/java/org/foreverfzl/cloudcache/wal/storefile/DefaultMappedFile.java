@@ -18,6 +18,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
@@ -57,8 +58,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
     protected int blockSize;
+    //指针更新截至block位置，默认为totalBlockCount，如果期间出现block写入失败，则默认是第一个失败block的位置
+    protected int endBlockIndex;
 
-    //blockStateArray[] 为0代表该block啥也不是，1代表该block数据全部写入到PageCache中，3代表该block已经上传到服务器
+    //blockStateArray[] 为0代表该block既没写也没上传，1代表该block数据全部写入到PageCache中，3代表该block已经上传到服务器
     protected short[] blockStateArray;
     //引入数组元素的 VarHandle，用于消灭原生数组的内存可见性缺陷
     private static final VarHandle SHORT_ARRAY_HANDLE;
@@ -99,6 +102,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.manager = manager;
         this.metaDirty = 1;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
+        this.endBlockIndex = totalBlockCount;
         blockStateArray = new short[totalBlockCount];
         arena = Arena.ofShared(); //创建MS的控制对象
         init(isWarm, isLockMemory);
@@ -164,7 +168,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public void ackReadPosition() {
         while (true) {
             int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
-            if (curReadBlockIndex == totalBlockCount) {
+            //如果到了截至位置则直接退出不更新
+            if (curReadBlockIndex == endBlockIndex) {
                 break;
             }
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, curReadBlockIndex);
@@ -206,8 +211,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         while (true) {
             // 在循环外固定当前要检查的索引
             int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
-            //如果越界了则代表该文件都更新完了，退出
-            if (currentIndex == totalBlockCount) {
+            //如果到了截至位置则直接退出不更新
+            if (currentIndex == endBlockIndex) {
                 break;
             }
             // 检查当前索引位置是否已填坑
@@ -301,8 +306,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     @Override
     public AppendMessageResult appendData(final DataStruct dataStruct) {
-        if (!isAvailable())
+        if (!isAvailable()) {
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+        }
+        if (dataStruct == null) {
+            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+        }
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
@@ -310,6 +319,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
         //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
         //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
         int logicalIndex;
+        //获取该文件的引用
+        this.getRefCount();
         while (true) {
             currentPos = WROTE_POSITION_UPDATER.get(this);
             newPos = currentPos + msgSize;
@@ -328,11 +339,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     //padding至少4字节，如果少于4字节不做padding
                     if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
-                    //将对应blockIndex位置设置为在pageCache中
-                    SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 1);
                     //如果是文件结尾则直接返回
                     if (paddingPos == this.fileSize) {
-                        manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
                         close(); //关闭文件
                         return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
                     }
@@ -416,7 +424,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     writeOffset, size, fileName, e);
             //出现异常关闭文件
             this.close();
+            int loginBlockIndex = Math.toIntExact(ProjectUtil.divideByPower(writeOffset, blockSize));
+            //然后更新endBlockIndex
+            endBlockIndex = Math.min(endBlockIndex, loginBlockIndex);
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
+        }finally {
+            //释放引用
+            this.release();
         }
     }
 
@@ -449,12 +463,24 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     @Override
     public void delete() {
-        clean();
+        //真正删除文件
+        String path = null;
+        try {
+            if (file != null && file.exists()) {
+                path = file.getAbsolutePath();
+                Files.delete(file.toPath());
+                manager.removeMappedFile(this.fileFromOffset);
+                log.info("文件已删除: {}", path);
+            }
+        } catch (Exception e) {
+            log.warn("{} file delete failed", path, e);
+        }
+
     }
 
     //是否能删除，true代表可以删除
     public boolean canDelete() {
-        return getRefCount() == 0 && isCleanup() && !isAvailable();
+        return getRefCount() == 0 && isCleanup();
     }
 
     //是否清除资源，true代表可以

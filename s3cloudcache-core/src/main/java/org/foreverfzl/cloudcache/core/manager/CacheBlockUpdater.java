@@ -53,6 +53,7 @@ public class CacheBlockUpdater {
             try {
                 // 3. 必须先抢到网络准入令牌，抢不到的虚拟线程会被 JVM 自动、高效地卸载挂起
                 upLoadLimiter.acquire();
+                block.getReference();
                 //先将元数据改为上传中
                 long fileFromOffset = block.getFileFromOffset();
                 int logicalIndex = block.getLogicalIndex();
@@ -68,8 +69,8 @@ public class CacheBlockUpdater {
                         //然后ack确认上传指针
                         DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
                         defaultMappedFile.ackUpLoadPosition(logicalIndex);
-                        // 成功后归还内存
-                        manager.recycleBlock(block);
+                        //将block设置为清除
+                        block.setClean();
                         break;
                     }
                 }
@@ -82,6 +83,7 @@ public class CacheBlockUpdater {
                 handleUploadFailure(block);
             } finally {
                 // 4. 无论成功失败，释放令牌，让下一个块上云
+                block.releaseReference();
                 upLoadLimiter.release();
             }
         });
@@ -121,10 +123,11 @@ public class CacheBlockUpdater {
      * 上传失败后执行
      */
     private void handleUploadFailure(CloudCacheBlock block) {
-        //将元数据设置为失败，并上传到私信队列中
+        //将元数据设置为失败，并上传到死信队列中
         CacheBlockManager cacheBlockManager = block.getManager();
         DeadDataInfo deadDataInfo = new DeadDataInfo(cacheBlockManager.instanceName, cacheBlockManager.bucketName,
                 block.getFileFromOffset(), block.getLogicalIndex(), block.getS3Key());
+        block.setClean();
         manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex(), deadDataInfo);
     }
 

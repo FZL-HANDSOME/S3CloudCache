@@ -35,6 +35,4 @@ public interface DataStruct {
     int getDataLen();
 
 
-
-
 }

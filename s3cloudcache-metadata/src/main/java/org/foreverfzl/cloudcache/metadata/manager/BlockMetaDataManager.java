@@ -59,6 +59,11 @@ public class BlockMetaDataManager {
         return blockRecoverQueue.take();
     }
 
+    public void deleteMetaData(long fileFromOffset, int blockIndex) {
+        long key = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
+        metaDataMap.remove(key);
+    }
+
 
     /**
      * 获取或者创建BlockMetaData
@@ -82,11 +87,14 @@ public class BlockMetaDataManager {
     }
 
     /**
-     * 增加写入到PageCache的字节数，如果PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
+     * 增加写入到PageCache的字节数，如果封口并且PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
      * 该方法返回true则代表可以将对应文件的对应block设置为1(可以刷新状态)
      */
     public boolean addPageCacheBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return false;
+        }
         blockMetaData.addPageCacheBytes(bytes);
         blockMetaData.updateLastTime();
         //如果该block封口了并且全部数据写入到PageCache中
@@ -102,6 +110,9 @@ public class BlockMetaDataManager {
      */
     public void addExpectedBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
         blockMetaData.addExpectedBytes(bytes);
     }
 
@@ -109,7 +120,11 @@ public class BlockMetaDataManager {
      * 增加已经完成写入字节数
      */
     public void addFinishedBytes(long fileFromOffset, int blockIndex, int bytes) {
-        get(fileFromOffset, blockIndex).addFinishedBytes(bytes);
+        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
+        blockMetaData.addFinishedBytes(bytes);
     }
 
     /**
@@ -117,6 +132,9 @@ public class BlockMetaDataManager {
      */
     public void trySeal(long fileFromOffset, int blockIndex) {
         BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
         boolean trySeal = false;
         synchronized (this) {
             if (blockMetaData.getState() == BlockMetaData.SEALED) {
@@ -134,6 +152,9 @@ public class BlockMetaDataManager {
     //将对应的元数据设置为Broke
     public void setMetaDataBroken(long fileFromOffset, int blockIndex) {
         BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
+        if (blockMetaData == null) {
+            return;
+        }
         synchronized (this) {
             if (blockMetaData.isBroken()) {
                 return;

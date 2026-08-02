@@ -19,6 +19,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
 
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
     private volatile long writePosition; //写指针
+    //如果WAL文件中有一个数据写入失败，则该物理Block应该标记为clean
+    private volatile boolean isClean = false;
 
     //globalMemorySegment的一个切片
     protected final MemorySegment memorySegment;
@@ -83,6 +85,12 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         long refs = this.refCount.decrementAndGet();
         //最后一个线程看是否满足上传需求
         if (refs == 0) {
+            //如果需要clean则进行clean并放回到空闲池中
+            if (isClean) {
+                clean();
+                manager.recycleBlock(this);
+            }
+            //如果可以上传则上传
             if (manager.blockMetaDataManager.canUpload(this.fileFromOffset, this.logicalIndex)) {
                 manager.updateBlock(this);
             }
@@ -145,6 +153,9 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     public CacheBlockManager getManager() {
         return manager;
     }
+    public void setClean(){
+        this.isClean = true;
+    }
 
     public void clean() {
         this.s3Key = null;
@@ -152,6 +163,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.defaultMappedFile = null;
         this.fileFromOffset = 0;
         this.logicalIndex = 0;
-        this.refCount.set(0);
+        this.isClean =false;
     }
 }

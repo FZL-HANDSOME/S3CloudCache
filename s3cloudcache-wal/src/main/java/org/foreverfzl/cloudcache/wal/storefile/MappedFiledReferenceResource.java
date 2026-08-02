@@ -7,7 +7,7 @@ public abstract class MappedFiledReferenceResource {
 
     private final AtomicInteger refCount = new AtomicInteger(0); //目前又多少个线程使用我
     private volatile boolean available = true; //是否可写
-    private volatile boolean cleanup = false; //文件资源是否清除
+    private volatile boolean cleanup = false; //文件资源是否清除，为true也代表该文件可以被删除
 
 
     public boolean isAvailable() {

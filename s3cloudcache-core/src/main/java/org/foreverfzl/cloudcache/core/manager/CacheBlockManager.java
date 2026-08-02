@@ -119,6 +119,10 @@ public class CacheBlockManager {
         try {
             size = dataStruct.getDataLen();
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix);
+            //如果此时Block不能写入，则直接返回
+            if (!cacheBlock.isActive()) {
+                return AppendDataResult.fail(fileFromOffset, blockIndex);
+            }
             cacheBlock.getReference();
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
@@ -145,6 +149,25 @@ public class CacheBlockManager {
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
                 cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
+    }
+
+    /**
+     * 如果一个逻辑或者物理block出现错误，会调用该方法删除回收对应的物理block
+     */
+    public String deleteBlock(long fileFromOffset, int blockIndex) {
+        long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
+        CloudCacheBlock deleteBlock = keyBlockMap.get(cacheBlockKey);
+        if (deleteBlock == null) {
+            return null;
+        }
+        //这里拿到引用的目的就是为了能稳定触发clean
+        deleteBlock.getReference();
+        //设置为不可以写
+        deleteBlock.setUnActive();
+        //将block标记为删除
+        deleteBlock.setClean();
+        deleteBlock.releaseReference();
+        return deleteBlock.getS3Key();
     }
 
 
@@ -193,19 +216,22 @@ public class CacheBlockManager {
     }
 
     /**
-     * 将一个用完结束的旧 CloudCacheBlock 重新放入到 CloudCacheBlock 池中，并清理其属性和内存空间。
+     * 将block重新放回到block池中
      */
-    public void recycleBlock(CloudCacheBlock block) throws InterruptedException {
+    public void recycleBlock(CloudCacheBlock block) {
         if (block == null) {
             return;
         }
-        // 2. 从 K-V 映射中移除
-        long key = ProjectUtil.buildBlockKey(block.getFileFromOffset(), block.getLogicalIndex());
-        keyBlockMap.remove(key);
-        // 3. 清理 Block 的属性
-        block.clean();
-        // 4. 重新放入空闲池中
-        freeBlocks.put(block);
+        try {
+            // 从 K-V 映射中移除
+            long key = ProjectUtil.buildBlockKey(block.getFileFromOffset(), block.getLogicalIndex());
+            keyBlockMap.remove(key);
+            // 重新放入空闲池中
+            freeBlocks.put(block);
+        } catch (InterruptedException e) {
+            log.warn("{}block was interrupted during put", block);
+        }
+
     }
 
     private Object getLock(long key) {

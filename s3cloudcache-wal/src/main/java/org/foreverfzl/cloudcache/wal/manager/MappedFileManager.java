@@ -40,14 +40,6 @@ public class MappedFileManager {
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
 
-    //所有文件的上传指针
-    private final int flushFileUpLoadPositonTime;
-    //该线程就是刷新所有文件的上传指针
-    private final Thread flushFileUpLoadPositionThread;
-    //该instance下所有的mappedFile的全局上传指针，该指针之前的数据全上传到云上，该指针之前的文件可以删除
-    private volatile long globalUpLoadPosition;
-    //当前上传指针更新到的最后一个文件
-    private final AtomicReference<DefaultMappedFile> upLoadActiveMappedFile = new AtomicReference<>();
 
     //检查所有的文件，控制文件是否要删除，把globalUpLoadPosition指针之前的文件全部删除，因为前面的文件已经上传到服务了
     private final int chackMappedFileTime;
@@ -93,15 +85,12 @@ public class MappedFileManager {
         this.dirPath = dirPath;
         this.fromOffset = fromOffset;
         this.config = config;
-        this.globalUpLoadPosition = fromOffset;
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
         this.saveBucketMeta(new MetaInfo(config.walFileSize, config.blockSize, config.s3KeyPrefix));//保存该bucket的元数据
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
         this.chackMappedFileTime = config.chackMappedFileTime;
-        this.flushFileUpLoadPositonTime = config.flushFileUpLoadPositionTime;
-        this.flushFileUpLoadPositionThread = new Thread(this::flushUpLoadPositionTask);
         this.chackMappedFileThread = new Thread(this::chackMappedFileTask);
         this.fileMetaFlushThread = new Thread(this::flushFileMeta);
         this.flushFileReadPositionThread = new Thread(this::flushReadPositionTask);
@@ -111,16 +100,15 @@ public class MappedFileManager {
 
     //启动线程，创建初始文件等
     private void init() {
-//        flushFileUpLoadPositionThread.start();
 //        chackMappedFileThread.start();
 //        fileMetaFlushThread.start();
+//        flushFileReadPositionThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
         DefaultMappedFile startFile = synCreateMappedFile(fromOffset);
         activeMappedFile.compareAndSet(null, startFile);
-        upLoadActiveMappedFile.compareAndSet(null, startFile);
     }
 
-    //todo 将数据添加到指定文件，如果文件满了则获取新的文件进行写，如果是其它错误则分情况而论
+
     public AppendMessageResult appendData(final DataStruct dataStruct) {
         AppendMessageResult result = null;
         DefaultMappedFile oldMappedFile = null;
@@ -130,8 +118,10 @@ public class MappedFileManager {
             oldMappedFile.hold();
             //先去目前活跃的文件中添加数据
             result = oldMappedFile.appendData(dataStruct);
-            //只要写没成功，关闭文件创建新的文件重试
-            if (!result.isOk()) {
+            //如果是文件结尾或者关闭，则创建新的文件进行写
+            AppendMessageResult.AppendStatus status = result.getStatus();
+            if (status == AppendMessageResult.AppendStatus.END_OF_FILE
+                    || status == AppendMessageResult.AppendStatus.FILE_CLOSED) {
                 //获取最新的写文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
                 DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
@@ -220,43 +210,6 @@ public class MappedFileManager {
 
     }
 
-    //刷新全局文件的上传指针
-    private void flushUpLoadPositionTask() {
-        while (active) {
-            try {
-                DefaultMappedFile mappedFile = upLoadActiveMappedFile.get();
-                if (mappedFile == null) {
-                    // 如果实在没找到，说明系统还没初始化好第一个文件，sleep 等待
-                    log.warn("flushUpLoadPositionTask failed: can not find DefaultMappedFile Object");
-                    Thread.sleep(flushFileUpLoadPositonTime);
-                    continue;
-                }
-                long curUpLoadPosition = mappedFile.upLoadPosition + mappedFile.fileFromOffset;
-                if (curUpLoadPosition != globalUpLoadPosition) {
-                    //如果不相等则更新
-                    globalUpLoadPosition = curUpLoadPosition;
-                } else {
-                    //相等看看该文件是否还有可能更新上传指针
-                    if (!mappedFile.isContinueUpdateUpLoadPosition()) {
-                        Map.Entry<Long, DefaultMappedFile> next = mappedFiles.higherEntry(mappedFile.fileFromOffset);
-                        if (next != null) {
-                            globalUpLoadPosition = next.getKey();
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                log.warn("flushUpLoadPositionTask failed", e);
-            }
-            try {
-                Thread.sleep(flushFileUpLoadPositonTime);
-            } catch (Exception e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-
-        }
-    }
-
     //保存该bucket的元数据
     private void saveBucketMeta(MetaInfo metaInfo) {
         Path metaPath = Path.of(dirPath, META_FILE_NAME);
@@ -311,24 +264,23 @@ public class MappedFileManager {
     private void chackMappedFileTask() {
         while (active) {
             try {
-                //获取全局上传指针之前的所有文件
-                Collection<DefaultMappedFile> values = mappedFiles.headMap(globalUpLoadPosition).values();
+                Collection<DefaultMappedFile> values = mappedFiles.values();
                 if (!values.isEmpty()) {
                     for (DefaultMappedFile file : values) {
-                        if (file.canDelete()) {
-                            //如果文件可以删除则直接删除
-                            file.delete();
+                        if (file.canClean()) {
+                            file.clean();
                             continue;
                         }
-                        if (file.canClean()) {
-                            //文件关闭了，但是资源没清除，清除资源下一次删除
-                            file.clean();
+                        if (file.canDelete()) {
+                            file.delete();
+                            continue;
                         }
                     }
                 }
             } catch (Exception e) {
                 log.warn("chackMappedFileTask failed", e);
             }
+
             try {
                 Thread.sleep(chackMappedFileTime);
             } catch (Exception e) {
@@ -379,9 +331,14 @@ public class MappedFileManager {
         }
     }
 
-    public DefaultMappedFile getFile(long fileFromOffset, int blockIndex) {
-        return mappedFiles.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
+    public void removeMappedFile(long fileFromOffset) {
+        mappedFiles.remove(fileFromOffset);
     }
+
+    public DefaultMappedFile getMappedFile(long fileFromOffset) {
+        return mappedFiles.get(fileFromOffset);
+    }
+
 
     public AtomicReference<DefaultMappedFile> getActiveMappedFile() {
         return activeMappedFile;

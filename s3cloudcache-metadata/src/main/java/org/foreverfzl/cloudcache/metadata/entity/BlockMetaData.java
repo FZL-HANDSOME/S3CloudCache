@@ -35,6 +35,7 @@ public class BlockMetaData {
     private volatile int finishedBytes;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile long lastActiveTime;
+    //该Broken指的是 物理Block
     private volatile boolean isBroken;
 
 

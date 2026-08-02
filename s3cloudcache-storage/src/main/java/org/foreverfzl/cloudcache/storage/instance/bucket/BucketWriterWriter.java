@@ -60,16 +60,24 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         WriteResult writeResult = null;
         try {
             AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
+            long fileFromOffset = result.getFileFromOffset();
+            int logicalIndex = result.getLogicalIndex();
+            //如果出现其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
             if (!result.isOk()) {
                 log.warn("WAL数据添加失败，result==>{}", result);
+                //将对应的物理block标记为删除
+                String s3Key = cacheBlockManager.deleteBlock(fileFromOffset, logicalIndex);
+                //将对应的元数据删除
+                blockMetaDataManager.deleteMetaData(fileFromOffset, logicalIndex);
+                return new WriteResult(s3Key, -1, -1, false);
             }
-            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(),result.getFileFromOffset(), result.getLogicalIndex()
+            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
                     , data, 0, data.length);
             AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
             if (!blockResult.result()) {
                 log.warn("Block数据添加失败，blockResult==>{}", blockResult);
             }
-            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size());
+            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
         }
@@ -105,8 +113,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
                 long fileFromOffset = task.getFileFromOffset();
                 int blockIndex = task.getBlockIndex();
-                //获取对应的文件对应block的MS切片
-                DefaultMappedFile mappedFile = mappedFileManager.getFile(fileFromOffset, blockIndex);
+                DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
                 int blockSize = mappedFile.getBlockSize();
                 long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);
                 long pos = fileFromOffset + ((long) blockIndex * blockSize);
@@ -128,7 +135,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile,fileFromOffset, blockIndex, orgData, 0, dataLen));
+                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen));
                     crc.reset();
                 }
             } catch (InterruptedException interruptedException) {
