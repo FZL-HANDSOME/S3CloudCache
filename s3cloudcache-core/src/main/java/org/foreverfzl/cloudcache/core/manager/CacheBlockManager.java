@@ -5,6 +5,7 @@ import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -116,9 +117,10 @@ public class CacheBlockManager {
         int size = 0;
         long fileFromOffset = dataStruct.getFileFromOffset();
         int blockIndex = dataStruct.getBlockIndex();
+        DefaultMappedFile defaultMappedFile = dataStruct.getDefaultMappedFile();
         try {
             size = dataStruct.getDataLen();
-            cacheBlock = getBlock(fileFromOffset, blockIndex, prefix);
+            cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
             //如果此时Block不能写入，则直接返回
             if (!cacheBlock.isActive()) {
                 return AppendDataResult.fail(fileFromOffset, blockIndex);
@@ -180,14 +182,14 @@ public class CacheBlockManager {
     }
 
     public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
-        return this.getBlock(fileFromOffset, blockIndex, config.s3KeyPrefix);
+        return this.getBlock(fileFromOffset, blockIndex, config.s3KeyPrefix, null);
     }
 
     /**
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
      * 如果该 cacheBlockKey 已经关联了某个 Block，则直接返回已有的 Block。
      */
-    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex, String prefix) throws InterruptedException {
+    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex, String prefix, DefaultMappedFile defaultMappedFile) throws InterruptedException {
         long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block
         CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
@@ -205,6 +207,7 @@ public class CacheBlockManager {
             block.setS3Key(ProjectUtil.generateUniqueS3Key(prefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
             block.setFileFromOffset(fileFromOffset);
             block.setLogicalIndex(blockIndex);
+            block.setDefaultMappedFile(defaultMappedFile);
             keyBlockMap.put(cacheBlockKey, block);
             return block;
         }

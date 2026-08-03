@@ -203,7 +203,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 //bucket元数据错误，不恢复以前的数据
                 return;
             }
-            //这里创建新的CacheBlockManager专门进行数据恢复
+            //这里创建新的CacheBlockManager专门进行数据恢复，因为新的配置和老的配置可能不一样，因此用旧的配置创建一个CacheBlockManager
             String recoverBucketName = bucketName + "_" + "recover";
             long cacheSize = 128 * 1024 * 1024L;
             int blockUpLoadCount = (int) ProjectUtil.divideByPower(cacheSize, oldblockSize);
@@ -211,6 +211,8 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     null, cacheSize, oldblockSize, blockUpLoadCount, false);
             recoverExecutorService.execute(() -> {
                 recoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, oldPrefix);
+                //等待恢复完成删除recoverBlockManager
+                coreInstanceBucketManager.removeBlockManager(recoverBucketName);
             });
         } catch (Exception e) {
 
@@ -220,31 +222,30 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     //恢复一个bucket中的文件
     private void recoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager,
                              long oldFileSize, int oldblockSize, String prefix) {
-        ByteBuffer temp = ByteBuffer.allocate(4 * 1024);
         CRC32 crc32 = new CRC32();
         //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
         long curPos = 0;
         long endPos = 0;
         for (Path curPath : walFiles) {
-            long fileFromOffset = Long.parseLong(curPath.getFileName().toString());
-            try (FileChannel fileChannel = FileChannel.open(curPath, StandardOpenOption.READ)) {
-                fileChannel.read(temp);
-                //获取该文件的读和上传指针
-                long readPosition = temp.getLong();
-                long upLoadPosition = temp.getLong();
-                //清空缓冲区
-                temp.clear();
-                //然后创建文件，并且修改文件的指针状态
-                //(long fileFromOffset,long walFileSize,int blockSize,boolean isWarm,boolean isLock)
-                DefaultMappedFile defaultMappedFile = fileManager.synCreateMappedFile(fileFromOffset, oldFileSize, oldblockSize,
-                        false, false);
+            String fileName = curPath.getFileName().toString();
+            long fileFromOffset = Long.parseLong(fileName);
+            File file = curPath.toFile();
+            try {
+                //创建该文件的Java对象
+                DefaultMappedFile defaultMappedFile = new DefaultMappedFile(curPath.getParent().toString(), fileName, fileFromOffset, oldFileSize,
+                        file, oldblockSize, false, false, false, fileManager);
+                //先读取4KB的元数据区域，获取指针
+                long readPosition = defaultMappedFile.getLong(curPos);
+                curPos += 8;
+                long upLoadPosition = defaultMappedFile.getLong(curPos);
                 defaultMappedFile.wrotePosition = readPosition;
                 defaultMappedFile.readPosition = readPosition;
                 defaultMappedFile.upLoadPosition = upLoadPosition;
+                //将该文件添加到manage中
+                fileManager.addMappedFile(defaultMappedFile);
+                //不需要恢复数据，将文件关闭，让后台线程自己检测删除
                 if (readPosition == upLoadPosition) {
-                    //文件没有数据可以恢复，标记为删除，并且清除资源，由专门的线程去删除文件
                     defaultMappedFile.close();
-                    defaultMappedFile.clean();
                     continue;
                 }
                 //需要数据恢复的文件，读取文件指定区域数据进行恢复
@@ -255,9 +256,6 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 for (int i = 1; i <= blockCount; i++) {
                     endPos = curPos + oldblockSize;
                     int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(curPos, oldblockSize));
-                    //因为咱们是数据恢复，因此该block元数据一定是封口状态
-                    blockMetaDataManager.addExpectedBytes(defaultMappedFile.fileFromOffset, blockIndex, oldblockSize);
-                    blockMetaDataManager.trySeal(defaultMappedFile.fileFromOffset, blockIndex);
                     //如果可以读int并且是正常数据则读取
                     //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
                     while (endPos - curPos >= 4 && defaultMappedFile.getInt(curPos) == DataStruct.MAGIC_NUMBER) {
@@ -272,16 +270,22 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                             //数据错误直接退出
                             break;
                         }
+                        blockMetaDataManager.addExpectedBytes(fileFromOffset, blockIndex, valueLen);
+                        blockMetaDataManager.addPageCacheBytes(fileFromOffset, blockIndex, valueLen);
                         recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, fileFromOffset, blockIndex, orgData, 0, valueLen), prefix);
                         crc32.reset();
                     }
+                    //尝试封口
+                    blockMetaDataManager.trySeal(fileFromOffset, blockIndex);
                     //该block数据结束了，将该block上传
-                    blockMetaDataManager.addFinishedBytes(defaultMappedFile.fileFromOffset, blockIndex, oldblockSize);
-                    CloudCacheBlock block = recoverBlockManager.getExistingBlock(defaultMappedFile.fileFromOffset, blockIndex);
+                    CloudCacheBlock block = recoverBlockManager.getExistingBlock(fileFromOffset, blockIndex);
                     recoverBlockManager.updateBlock(block);
                     curPos = upLoadPosition + ((long) i * oldblockSize);
                 }
-            } catch (IOException e) {
+                //将该文件设置为清除
+                defaultMappedFile.upLoadPosition = readPosition;
+                defaultMappedFile.close();
+            } catch (Exception e) {
                 log.warn("recovering=>{} file created failed", fileFromOffset, e);
             }
         }

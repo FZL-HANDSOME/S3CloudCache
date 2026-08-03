@@ -6,6 +6,7 @@ import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.MetaInfo;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudcache.wal.storefile.MappedFile;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.exception.WalException;
@@ -327,6 +328,10 @@ public class MappedFileManager {
                 break;
             }
         }
+    }
+
+    public void addMappedFile(DefaultMappedFile mappedFile) {
+        mappedFiles.put(mappedFile.fileFromOffset,mappedFile);
     }
 
     public void removeMappedFile(long fileFromOffset) {

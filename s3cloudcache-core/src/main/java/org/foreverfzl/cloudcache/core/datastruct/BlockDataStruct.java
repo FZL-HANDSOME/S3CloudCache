@@ -1,5 +1,7 @@
 package org.foreverfzl.cloudcache.core.datastruct;
 
+import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+
 import java.lang.foreign.MemorySegment;
 
 /**
@@ -14,6 +16,8 @@ public interface BlockDataStruct {
     int getBlockIndex();
 
     int getDataLen();
+
+    DefaultMappedFile getDefaultMappedFile();
 
 
 

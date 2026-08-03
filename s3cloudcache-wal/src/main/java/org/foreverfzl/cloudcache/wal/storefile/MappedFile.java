@@ -8,8 +8,6 @@ import java.nio.channels.FileChannel;
 
 public interface MappedFile {
 
-    public void init(boolean isWarm, boolean isLockMemory);
-
     /**
      * 文件预热，并且根据配置选择是否锁定预热PageCache
      *

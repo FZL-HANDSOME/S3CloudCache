@@ -73,6 +73,10 @@ public class CoreInstanceBucketManager {
         }
     }
 
+    public void removeBlockManager(String bucketName) {
+        managerHashMap.remove(bucketName);
+    }
+
     //通过hash分桶获取对应的Lock对象
     private ReentrantLock getLock(String bucketName) {
         return locks[bucketName.hashCode() & (LOCKS_COUNT - 1)];

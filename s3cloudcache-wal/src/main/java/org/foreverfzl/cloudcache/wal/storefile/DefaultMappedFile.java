@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
 
 /**
@@ -92,7 +93,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
-                             final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
+                             final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory,
+                             boolean isCreateFile, MappedFileManager manager) {
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
@@ -100,12 +102,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.blockSize = blockSize;
         this.file = file;
         this.manager = manager;
-        this.metaDirty = 1;
+        this.metaDirty = 0;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         this.endBlockIndex = totalBlockCount;
         blockStateArray = new short[totalBlockCount];
-        arena = Arena.ofShared(); //创建MS的控制对象
-        init(isWarm, isLockMemory);
+        init(isWarm, isLockMemory, isCreateFile);
     }
 
     /**
@@ -135,23 +136,38 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return null;
         }
         //文件不存在则创建
-        return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, newfile, blockSize, isWarm, isLockMemory, manager);
+        return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, newfile, blockSize, isWarm, isLockMemory, true, manager);
     }
 
 
     /**
      * 文件的内存分配以及预热、锁定等
      */
-    @Override
-    public void init(boolean isWarm, boolean isLockMemory) {
+    public void init(boolean isWarm, boolean isLockMemory, boolean isCreateFile) {
         try {
-            // 创建文件并设置大小
+            arena = Arena.ofShared(); // 创建 MemorySegment 的生命周期控制对象
+            // 1. 在打开句柄前，检测磁盘文件的真实存在性
+            boolean fileExists = file.exists();
+            if (!fileExists) {
+                // 文件不存在：自动创建父级目录（避免 FileNotFoundException）
+                File parentFile = file.getParentFile();
+                if (parentFile != null && !parentFile.exists()) {
+                    parentFile.mkdirs();
+                }
+            }
+            // 2. 以 "rw" 读写模式打开文件句柄
+            // 说明：RandomAccessFile 在 "rw" 模式下，若文件存在则直接打开且【不会覆盖/清空原数据】；若不存在则自动创建 0 字节文件。
             RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
-            randomAccessFile.setLength(fileSize);
+            if (!fileExists) {
+                // 情况 A：新文件 -> 显式扩张物理文件到指定的 fileSize 大小
+                randomAccessFile.setLength(fileSize);
+            }
+            // 3. 获取 FileChannel 并完成内存映射
             fileChannel = randomAccessFile.getChannel();
             mappedMemorySegment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, fileSize, arena);
+            // 4. 按需预热
             if (isWarm) {
-                //进行文件预热，每16384页刷盘一次，防止脏页过多
+                // 进行文件预热，每 16384 页（64MB）刷盘一次，防止脏页过多
                 warm(16384, isLockMemory);
             }
         } catch (Exception e) {
@@ -275,6 +291,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
     //从指定位置获取一个int
     public int getInt(long fromOffset) {
         return mappedMemorySegment.get(JAVA_INT, fromOffset);
+    }
+
+    public long getLong(long fromOffset) {
+        return mappedMemorySegment.get(JAVA_LONG, fromOffset);
     }
 
     //从指定位置获取大小为sie的原始数据
@@ -428,7 +448,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //然后更新endBlockIndex
             endBlockIndex = Math.min(endBlockIndex, loginBlockIndex);
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
-        }finally {
+        } finally {
             //释放引用
             this.release();
         }
