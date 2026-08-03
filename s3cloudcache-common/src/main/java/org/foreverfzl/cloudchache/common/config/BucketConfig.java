@@ -116,8 +116,4 @@ public class BucketConfig {
         return this;
     }
 
-    public BucketConfig setFlushFileUpLoadPositionTime(Integer flushFileUpLoadPositionTime) {
-        this.flushFileUpLoadPositionTime = flushFileUpLoadPositionTime;
-        return this;
-    }
 }

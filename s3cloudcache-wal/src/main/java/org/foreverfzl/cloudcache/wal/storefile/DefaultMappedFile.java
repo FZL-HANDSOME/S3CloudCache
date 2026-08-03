@@ -70,7 +70,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_UPLOAD_INDEX_UPDATER;
 
     protected volatile int readBlockIndex = 0; //readPosition指针期望下次更新index
-    protected volatile int forceSize = 8 * 1024 * 1024;
+    protected volatile int forceSize = 8 * 1024 * 1024; //每次刷盘大小
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_READ_INDEX_UPDATER;
 
     //如果该文件的指针更新了该属性会被设置为1，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为0;

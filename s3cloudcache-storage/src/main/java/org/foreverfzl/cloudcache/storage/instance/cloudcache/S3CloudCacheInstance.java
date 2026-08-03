@@ -18,7 +18,10 @@ import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.foreverfzl.cloudchache.common.exception.CloudCacheException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 import java.io.File;
 import java.io.IOException;
@@ -86,6 +89,32 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         MappedFileManager bucketWalManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
         CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, bucketWalManager.blockMetaDataManager);
         return new BucketWriterWriter(bucketName, bucketWalManager, bucketCoreManager, bucketWalManager.blockMetaDataManager, this);
+    }
+
+    /**
+     * 使用原始 S3Client 将指定内存段上传为一个对象。
+     *
+     * @param bucketName 目标 Bucket 名称
+     * @param s3Key      目标对象 Key
+     * @param data       待上传数据，可为堆内或堆外 MemorySegment
+     */
+    public PutObjectResponse s3RawPutObject(String bucketName, String s3Key, MemorySegment data) {
+        if (bucketName == null || bucketName.isBlank()) {
+            throw new CloudCacheException("bucketName can not be null or blank");
+        }
+        if (s3Key == null || s3Key.isBlank()) {
+            throw new CloudCacheException("s3Key can not be null or blank");
+        }
+        if (data == null) {
+            throw new CloudCacheException("data can not be null");
+        }
+
+        PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(bucketName)
+                .key(s3Key)
+                .build();
+        PutObjectResponse response = s3Client.putObject(request, RequestBody.fromByteBuffer(data.asByteBuffer()));
+        return response;
     }
 
     //start负责扫描目录、恢复数据等

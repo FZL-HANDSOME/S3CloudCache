@@ -9,6 +9,7 @@ public abstract class AbstractBucketWriter implements Writer {
 
     /**
      * 照顾普通低频业务，允许一次堆内到堆外的拷贝
+     *
      * @param data
      * @return
      */
@@ -16,6 +17,7 @@ public abstract class AbstractBucketWriter implements Writer {
 
     /**
      * 照顾池化了 byte[] 的业务，避免了业务层的二次数组裁剪。
+     *
      * @param data
      * @param offset
      * @param length
@@ -39,5 +41,10 @@ public abstract class AbstractBucketWriter implements Writer {
      */
     public abstract WriteResult write(ByteBuffer buffer, long offset, long length);
 
-    public abstract DeadDataInfo getDeadDataInfo() throws InterruptedException;
+    /**
+     * 监听死信队列中的数据
+     */
+    public abstract MappedFileReader getDeadDataInfo() throws InterruptedException;
+
+
 }

@@ -17,6 +17,7 @@ import org.foreverfzl.cloudchache.common.LogName;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
 
@@ -77,7 +78,11 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             if (!blockResult.result()) {
                 log.warn("Block数据添加失败，blockResult==>{}", blockResult);
             }
-            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
+            if (!blockResult.result()) {
+                writeResult = new WriteResult(blockResult.s3Key(), -1, -1, false);
+            } else {
+                writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
+            }
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
         }
@@ -96,15 +101,26 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     @Override
     public WriteResult write(ByteBuffer buffer, long offset, long length) {
-
         return null;
     }
 
-    //监听死信队列的数据
+    //监听死信队列的数据，内部指明了哪个bucket哪个文件哪个block中的数据上传不上去，
+    //然后提供Reader给用户读取、上传、确认API
     @Override
-    public DeadDataInfo getDeadDataInfo() throws InterruptedException {
-        return blockMetaDataManager.getDeadDataInfo();
+    public MappedFileReader getDeadDataInfo() throws InterruptedException{
+        DeadDataInfo deadDataInfo = blockMetaDataManager.getDeadDataInfo();
+        long fileFromOffset=deadDataInfo.getFileFromOffset();
+        int blockIndex=deadDataInfo.getLogicalIndex();
+        DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
+        if (mappedFile == null) {
+            throw new NullPointerException("MappedFile is null");
+        }
+        int blockSize = mappedFile.getBlockSize();
+        MemorySegment memorySegment = mappedFile.getBlockMappedMemorySegmentSlice(blockIndex);
+        MappedFileReader reader = new MappedFileReader(mappedFile,memorySegment, blockSize,deadDataInfo);
+        return reader;
     }
+
 
     private void getBlockBroken() {
         while (active) {

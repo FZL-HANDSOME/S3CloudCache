@@ -189,7 +189,6 @@ public class MappedFileManager {
     private void flushReadPositionTask() {
         while (active) {
             try {
-                //获取全局上传指针之前的所有文件
                 Collection<DefaultMappedFile> values = mappedFiles.values();
                 if (!values.isEmpty()) {
                     for (DefaultMappedFile file : values) {
@@ -207,7 +206,6 @@ public class MappedFileManager {
                 break;
             }
         }
-
     }
 
     //保存该bucket的元数据
@@ -338,7 +336,6 @@ public class MappedFileManager {
     public DefaultMappedFile getMappedFile(long fileFromOffset) {
         return mappedFiles.get(fileFromOffset);
     }
-
 
     public AtomicReference<DefaultMappedFile> getActiveMappedFile() {
         return activeMappedFile;
