@@ -22,9 +22,9 @@ public class MetaInfo {
     private final byte[] data;
 
 
-    public MetaInfo(long fileSize,int blockSize,String s3KeyPrefix) {
-        this.fileSize=fileSize;
-        this.blockSize=blockSize;
+    public MetaInfo(long fileSize, int blockSize, String s3KeyPrefix) {
+        this.fileSize = fileSize;
+        this.blockSize = blockSize;
         this.data = s3KeyPrefix.getBytes(StandardCharsets.UTF_8);
         this.dataLen = data.length;
         updateCrc();

@@ -75,7 +75,7 @@ public class CacheBlockUpdater {
                     }
                 }
                 //三次重试还不成功，抛出异常
-                if (isSuccess) {
+                if (!isSuccess) {
                     throw new CoreException("Failed to upload block");
                 }
             } catch (Exception t) {
@@ -131,7 +131,7 @@ public class CacheBlockUpdater {
         manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex(), deadDataInfo);
     }
 
-    public void close() throws Exception {
+    public void close() {
         s3VirtualExecutor.shutdown();
     }
 }

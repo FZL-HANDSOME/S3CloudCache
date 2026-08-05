@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
 
 /**
@@ -32,9 +33,14 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private final MappedFileManager mappedFileManager;
 
+    private WriterState state;
+
     private final CacheBlockManager cacheBlockManager;
 
     private final S3CloudCacheInstance instance;
+
+    //该bucket下有多少线程正在写入
+    private final AtomicLong walWriteCount = new AtomicLong(0L);
 
     private final BlockMetaDataManager blockMetaDataManager;
     private volatile boolean active = true;
@@ -46,6 +52,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         this.mappedFileManager = mappedFileManager;
         this.cacheBlockManager = cacheBlockManager;
         this.instance = instance;
+        this.state = WriterState.RUNNING;
         this.blockMetaDataManager = blockMetaDataManager;
         getBlockBrokenTaskThread = new Thread(this::getBlockBroken);
         init();
@@ -60,7 +67,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     public WriteResult write(byte[] data) {
         WriteResult writeResult = null;
         try {
+            walWriteCount.incrementAndGet();
             AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
+            walWriteCount.decrementAndGet();
             long fileFromOffset = result.getFileFromOffset();
             int logicalIndex = result.getLogicalIndex();
             //如果出现其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
@@ -107,17 +116,17 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     //监听死信队列的数据，内部指明了哪个bucket哪个文件哪个block中的数据上传不上去，
     //然后提供Reader给用户读取、上传、确认API
     @Override
-    public MappedFileReader getDeadDataInfo() throws InterruptedException{
+    public MappedFileReader getDeadDataInfo() throws InterruptedException {
         DeadDataInfo deadDataInfo = blockMetaDataManager.getDeadDataInfo();
-        long fileFromOffset=deadDataInfo.getFileFromOffset();
-        int blockIndex=deadDataInfo.getLogicalIndex();
+        long fileFromOffset = deadDataInfo.getFileFromOffset();
+        int blockIndex = deadDataInfo.getLogicalIndex();
         DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
         if (mappedFile == null) {
             throw new NullPointerException("MappedFile is null");
         }
         int blockSize = mappedFile.getBlockSize();
         MemorySegment memorySegment = mappedFile.getBlockMappedMemorySegmentSlice(blockIndex);
-        MappedFileReader reader = new MappedFileReader(mappedFile,memorySegment, blockSize,deadDataInfo);
+        MappedFileReader reader = new MappedFileReader(mappedFile, memorySegment, blockSize, deadDataInfo);
         return reader;
     }
 
@@ -163,10 +172,35 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         }
     }
 
+    public void stopWrite() {
+        this.state=WriterState.CLOSING;
+    }
+
+    //关闭的时候会触发
+    public void waitWriterFinished(long deadline) {
+        //1：等待所有的线程写入完成
+        while (walWriteCount.get() != 0) {
+            try {
+                if (System.currentTimeMillis() >= deadline) {
+                    //超时退出
+                    log.warn("{} close timeout, force shutdown", bucketName);
+                    return;
+                }
+                Thread.sleep(20);
+            } catch (Exception e) {
+            }
+        }
+    }
+
+
     //todo关闭资源
     public void close() {
         mappedFileManager.close();
         cacheBlockManager.close();
-        instance.close();
+    }
+
+
+    public String getBucketName() {
+        return bucketName;
     }
 }

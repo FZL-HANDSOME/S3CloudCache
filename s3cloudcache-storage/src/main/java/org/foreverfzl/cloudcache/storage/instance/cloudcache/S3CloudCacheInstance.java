@@ -34,6 +34,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
@@ -61,6 +63,11 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
      */
     private final CoreInstanceBucketManager coreInstanceBucketManager;
 
+    /**
+     * 管理维护该Instance下所有的BucketWriter
+     */
+    private final ConcurrentHashMap<String, BucketWriterWriter> bucketWriters = new ConcurrentHashMap<>();
+
     private final S3Client s3Client;
 
     //数据恢复线程池
@@ -85,10 +92,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         if (bucketName == null || bucketName.isBlank()) {
             throw new CloudCacheException("bucketName can not null");
         }
+        BucketWriterWriter bucketWriterWriter = bucketWriters.get(bucketName);
+        if (bucketWriterWriter != null) return bucketWriterWriter;
         //去容器中看看有没有对应的manager，有则返回，没有则创建
         MappedFileManager bucketWalManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
         CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, bucketWalManager.blockMetaDataManager);
-        return new BucketWriterWriter(bucketName, bucketWalManager, bucketCoreManager, bucketWalManager.blockMetaDataManager, this);
+        bucketWriterWriter = new BucketWriterWriter(bucketName, bucketWalManager, bucketCoreManager, bucketWalManager.blockMetaDataManager, this);
+        bucketWriters.put(bucketName, bucketWriterWriter);
+        return bucketWriterWriter;
     }
 
     /**
@@ -126,7 +137,8 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             recoverExecutorService = Executors.newFixedThreadPool(bucketCount);
             for (Path path : bucketPathList) {
                 String bucketName = path.getFileName().toString();
-                this.chackDirectoryAndFile(path, bucketName);
+                BucketConfig bucketConfig = config.getBucketConfig(bucketName);
+                this.chackDirectoryAndFile(path, bucketName, bucketConfig);
             }
 
         } catch (Exception e) {
@@ -135,20 +147,19 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
     //恢复一个具体bucket中的数据
-    private void chackDirectoryAndFile(Path path, String bucketName) throws IOException {
+    private void chackDirectoryAndFile(Path path, String bucketName, BucketConfig bucketConfig) throws IOException {
         if (path == null || !Files.exists(path)) {
             throw new CloudCacheException("bucket directory not exists: " + path);
         }
         if (!Files.isDirectory(path)) {
             throw new CloudCacheException("path is not directory: " + path);
         }
-
         /*
-         * 1.读取bucketMeta
+         * 1.读取bucketMeta，如果没有该文件则默认代表不需要数据恢复
          */
         Path bucketMetaPath = path.resolve("bucketMeta");
         if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
-            throw new CloudCacheException("bucketMeta not exists: " + bucketMetaPath);
+            return;
         }
         byte[] metaBytes = Files.readAllBytes(bucketMetaPath);
         MemorySegment segment = MemorySegment.ofArray(metaBytes);
@@ -176,18 +187,23 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         crc32.update(data);
         String oldPrefix = new String(data, StandardCharsets.UTF_8);
         boolean out = false;
+        //bucketMeta文件损坏，以前的文件无法恢复
         if ((int) crc32.getValue() != crc) {
-            //bucketMeta文件损坏，以前的文件无法恢复
             log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", path);
-            out = true;
+            return;
         }
-
+        //看看新的BlockSize是否比原来的BlockSize小，如果小的话就不恢复以前的数据
+        //因为我们采用的是最新配置的CacheBlock，如果老配置大于新配置需要多阶段提交上传，这里简单化
+        if (bucketConfig.blockSize < oldblockSize) {
+            log.warn("The new block size is smaller than the old block size. file path is{}", path);
+            return;
+        }
         /*
-         * 2.扫描获取wal目录下的所有文件的绝对路径
+         * 2.扫描获取wal目录下的所有文件的绝对路径，如果没有wal则默认不数据恢复
          */
         Path walPath = path.resolve("wal");
         if (!Files.exists(walPath) || !Files.isDirectory(walPath)) {
-            throw new CloudCacheException("wal directory not exists: " + walPath);
+            return;
         }
         //获取所有的文件绝对地址
         try (Stream<Path> stream = Files.list(walPath)) {
@@ -199,20 +215,9 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             //创建该bucket对应manager
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
             CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
-            if (out) {
-                //bucket元数据错误，不恢复以前的数据
-                return;
-            }
-            //这里创建新的CacheBlockManager专门进行数据恢复，因为新的配置和老的配置可能不一样，因此用旧的配置创建一个CacheBlockManager
-            String recoverBucketName = bucketName + "_" + "recover";
-            long cacheSize = 128 * 1024 * 1024L;
-            int blockUpLoadCount = (int) ProjectUtil.divideByPower(cacheSize, oldblockSize);
-            CacheBlockManager recoverBlockManager = coreInstanceBucketManager.getOrCreateBlockManager(recoverBucketName, fileManager.blockMetaDataManager,
-                    null, cacheSize, oldblockSize, blockUpLoadCount, false);
+            //恢复wal目录下的数据
             recoverExecutorService.execute(() -> {
-                recoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, oldPrefix);
-                //等待恢复完成删除recoverBlockManager
-                coreInstanceBucketManager.removeBlockManager(recoverBucketName);
+                recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix);
             });
         } catch (Exception e) {
 
@@ -296,10 +301,31 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         return Long.parseLong(path.getFileName().toString());
     }
 
+
     //todo 关闭资源
-    public void close() {
-        walInstanceBucketManager.close();
-        coreInstanceBucketManager.close();
+    public void close(long waitTime) {
+        long deadline = System.currentTimeMillis() + waitTime;
+        Collection<BucketWriterWriter> writers = bucketWriters.values();
+        //创建虚拟线程处理任务
+        try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (BucketWriterWriter writer : writers) {
+                closeExecutor.execute(() -> {
+                    //1；先将所有的bucket设置为关闭中，不可写入
+                    writer.stopWrite();
+                    //2：限时等待该writer完成写入
+                    writer.waitWriterFinished(deadline);
+                    //3：封口所有的block
+                    CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(writer.getBucketName());
+                    BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
+                    blockMetaDataManager.trySealAllBlock();
+                    //4：上传所有的block
+                    cacheBlockManager.updateAllBlock();
+
+                });
+            }
+
+        }
+
 
     }
 

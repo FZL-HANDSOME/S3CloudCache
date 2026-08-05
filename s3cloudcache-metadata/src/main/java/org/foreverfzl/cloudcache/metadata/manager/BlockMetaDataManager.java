@@ -205,6 +205,11 @@ public class BlockMetaDataManager {
         return metaData != null && metaData.getState() == 1;
     }
 
+    public boolean isSealed(Long key){
+        BlockMetaData metaData = metaDataMap.get(key);
+        return metaData != null && metaData.getState() == 1;
+    }
+
     /**
      * 是否已经全部写入完成，可以上传
      */
@@ -214,6 +219,15 @@ public class BlockMetaDataManager {
             return false;
         }
         return metaData.getState() == 1 && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
+    }
+
+    //将所有open的block封口
+    public void trySealAllBlock() {
+        for (BlockMetaData metaData : metaDataMap.values()) {
+            if (metaData.getState() == BlockMetaData.OPEN) {
+                metaData.trySeal();
+            }
+        }
     }
 
 }

@@ -38,11 +38,16 @@ public class CoreInstanceBucketManager {
     }
 
 
+    public CacheBlockManager onlyGetBlockManager(String bucketName) {
+        return managerHashMap.get(bucketName);
+    }
+
     public CacheBlockManager getOrCreateBlockManager(String bucketName, BlockMetaDataManager blockMetaDataManager) {
         BucketConfig bucketConfig = config.getBucketConfig(bucketName);
         return this.getOrCreateBlockManager(bucketName, blockMetaDataManager, bucketConfig, bucketConfig.cacheSize,
                 bucketConfig.blockSize, bucketConfig.blockUpLoadCount, true);
     }
+
 
     /**
      * 根据bucket获取对应的BlockManager

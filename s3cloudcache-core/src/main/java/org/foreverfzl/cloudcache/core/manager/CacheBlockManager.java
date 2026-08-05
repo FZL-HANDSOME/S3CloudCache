@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.Map;
 import java.util.concurrent.*;
 
 /**
@@ -179,6 +180,19 @@ public class CacheBlockManager {
     public void updateBlock(CloudCacheBlock cacheBlock) {
         //将block元数据设置为上传中
         blockUpdater.upLoadBlock(cacheBlock);
+    }
+
+    /**
+     * 上传所有封口的Block
+     */
+    public void updateAllBlock() {
+        for (Map.Entry<Long, CloudCacheBlock> entry : keyBlockMap.entrySet()) {
+            Long key = entry.getKey();
+            if (!blockMetaDataManager.isSealed(key)) {
+                continue;
+            }
+            blockUpdater.upLoadBlock(entry.getValue());
+        }
     }
 
     public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
