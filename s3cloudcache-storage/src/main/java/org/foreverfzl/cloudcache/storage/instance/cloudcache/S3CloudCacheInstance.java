@@ -7,6 +7,8 @@ import org.foreverfzl.cloudcache.core.global.CoreInstanceBucketManager;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
+import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
+import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
@@ -157,41 +159,18 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         /*
          * 1.读取bucketMeta，如果没有该文件则默认代表不需要数据恢复
          */
-        Path bucketMetaPath = path.resolve("bucketMeta");
-        if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
+        BucketMetaInfo bucketMetaInfo = BucketMetaInfoUtil.readBucketMetaFile(path);
+        if (bucketMetaInfo == null) {
             return;
         }
-        byte[] metaBytes = Files.readAllBytes(bucketMetaPath);
-        MemorySegment segment = MemorySegment.ofArray(metaBytes);
-        long pos = 0;
-        // 读取 fileSize (long, 8 bytes)
-        long oldFileSize = segment.get(ValueLayout.JAVA_LONG, pos);
-        pos += 8;
-        // 读取 blockSize (int, 4 bytes)
-        int oldblockSize = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 CRC (int, 4 bytes)
-        int crc = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 dataLen (int, 4 bytes)
-        int dataLen = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 data (byte[])
-        byte[] data = new byte[dataLen];
-        MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
-        //校验数据
-        CRC32 crc32 = new CRC32();
-        crc32.update(Math.toIntExact(oldFileSize));
-        crc32.update(oldblockSize);
-        crc32.update(dataLen);
-        crc32.update(data);
-        String oldPrefix = new String(data, StandardCharsets.UTF_8);
-        boolean out = false;
-        //bucketMeta文件损坏，以前的文件无法恢复
-        if ((int) crc32.getValue() != crc) {
-            log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", path);
+        int isDirty = bucketMetaInfo.getIsDirty();
+        //isDirty为0说明没可恢复的数据
+        if (isDirty == 0) {
             return;
         }
+        int oldblockSize = bucketMetaInfo.getBlockSize();
+        long oldFileSize = bucketMetaInfo.getFileSize();
+        String oldPrefix = new String(bucketMetaInfo.getData(), StandardCharsets.UTF_8);
         //看看新的BlockSize是否比原来的BlockSize小，如果小的话就不恢复以前的数据
         //因为我们采用的是最新配置的CacheBlock，如果老配置大于新配置需要多阶段提交上传，这里简单化
         if (bucketConfig.blockSize < oldblockSize) {
@@ -211,6 +190,10 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             List<Path> walFiles = stream.filter(Files::isRegularFile)
                     .sorted(Comparator.comparingLong(this::getFileFromOffset))
                     .toList();
+            //没有文件也不进行数据恢复
+            if (walFiles.isEmpty()) {
+                return;
+            }
             long endFileFromOffset = getFileFromOffset(walFiles.getLast()) + oldFileSize;
             //创建该bucket对应manager
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
@@ -302,9 +285,8 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
 
-    //todo 关闭资源
-    public void close(long waitTime) {
-        long deadline = System.currentTimeMillis() + waitTime;
+    public void close(long walWriteWaitTime, long upLoadWaitTime) {
+        long writeDeadline = System.currentTimeMillis() + walWriteWaitTime;
         Collection<BucketWriterWriter> writers = bucketWriters.values();
         //创建虚拟线程处理任务
         try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
@@ -313,13 +295,30 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     //1；先将所有的bucket设置为关闭中，不可写入
                     writer.stopWrite();
                     //2：限时等待该writer完成写入
-                    writer.waitWriterFinished(deadline);
-                    //3：封口所有的block
-                    CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(writer.getBucketName());
+                    writer.waitWriterFinished(writeDeadline);
+                    String bucketName = writer.getBucketName();
+                    CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
+                    MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
+                    //然后关闭所有的文件写入，关闭所有block的写入
+                    mappedFileManager.closeAllFile();
+                    //TODO
+                    //3：关闭所有的block的写入并且封口所有的block
                     BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
                     blockMetaDataManager.trySealAllBlock();
-                    //4：上传所有的block
-                    cacheBlockManager.updateAllBlock();
+                    //4：限时上传所有的block
+                    long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
+                    cacheBlockManager.updateAllBlock(upLoadDeadline);
+                    //5：刷新读指针(上传指针不用手动刷新，因为上传线程会自己刷新最新的位点)
+                    mappedFileManager.endFlushFileReadPosition();
+                    //6：强制刷新所有文件的元数据区域(本质只有含有脏数据的文件才刷新)
+                    mappedFileManager.endMetaFlush();
+                    //7：最后检查一遍文件
+                    mappedFileManager.endChackMappedFile();
+                    //8：看看是否有剩余的文件，如果没有文件了，则将bucketMeta文件的isDirty改为0
+                    if (!mappedFileManager.hasMappedFile()) {
+                        MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
+                        BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
+                    }
 
                 });
             }

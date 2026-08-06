@@ -153,7 +153,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     public CacheBlockManager getManager() {
         return manager;
     }
-    public void setClean(){
+
+    public void setClean() {
         this.isClean = true;
     }
 
@@ -163,6 +164,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.defaultMappedFile = null;
         this.fileFromOffset = 0;
         this.logicalIndex = 0;
-        this.isClean =false;
+        this.isClean = false;
     }
 }

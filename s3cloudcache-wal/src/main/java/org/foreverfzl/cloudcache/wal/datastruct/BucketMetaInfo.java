@@ -6,11 +6,14 @@ import java.util.zip.CRC32;
 /**
  * 一个Bucket对应的元数据 文件内容格式
  */
-public class MetaInfo {
+public class BucketMetaInfo {
 
-    private long fileSize;
+    //是否需要数据恢复，1代表需要，0代表不需要
+    private int isDirty;
 
     private int blockSize;
+
+    private long fileSize;
 
     private int crc;
 
@@ -22,7 +25,8 @@ public class MetaInfo {
     private final byte[] data;
 
 
-    public MetaInfo(long fileSize, int blockSize, String s3KeyPrefix) {
+    public BucketMetaInfo(int blockSize,long fileSize,  String s3KeyPrefix) {
+        this.isDirty = 1;
         this.fileSize = fileSize;
         this.blockSize = blockSize;
         this.data = s3KeyPrefix.getBytes(StandardCharsets.UTF_8);
@@ -30,8 +34,10 @@ public class MetaInfo {
         updateCrc();
     }
 
-    public MetaInfo(int crc, byte[] data) {
-        this.crc = crc;
+    public BucketMetaInfo(int isDirty, int blockSize, long fileSize, byte[] data) {
+        this.isDirty = isDirty;
+        this.fileSize = fileSize;
+        this.blockSize = blockSize;
         this.data = data;
         this.dataLen = data.length;
     }
@@ -59,6 +65,10 @@ public class MetaInfo {
 
     public byte[] getData() {
         return data;
+    }
+
+    public int getIsDirty() {
+        return isDirty;
     }
 
     public long getFileSize() {

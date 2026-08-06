@@ -430,6 +430,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
+            if(!isAvailable()){
+                throw new WalException("File is closed");
+            }
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
@@ -453,6 +456,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             this.release();
         }
     }
+
 
 
     /**
@@ -490,17 +494,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 path = file.getAbsolutePath();
                 Files.delete(file.toPath());
                 manager.removeMappedFile(this.fileFromOffset);
-                log.info("文件已删除: {}", path);
+                log.info("The file has been deleted.: {}", path);
             }
         } catch (Exception e) {
             log.warn("{} file delete failed", path, e);
         }
 
-    }
-
-    //是否能删除，true代表可以删除
-    public boolean canDelete() {
-        return getRefCount() == 0 && isCleanup();
     }
 
     //是否清除资源，true代表可以

@@ -1,15 +1,15 @@
 package org.foreverfzl.cloudcache.wal.manager;
 
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
+import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
-import org.foreverfzl.cloudcache.wal.datastruct.MetaInfo;
+import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
-import org.foreverfzl.cloudcache.wal.storefile.MappedFile;
-import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.foreverfzl.cloudcache.wal.storefile.MappedFiledReferenceResource;
+import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
-import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -18,14 +18,10 @@ import java.io.File;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
-import java.nio.channels.FileChannel;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 
@@ -33,7 +29,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 这个类专门管理该Bucket存在的文件
  */
 public class MappedFileManager {
-    private static final Logger log = LoggerFactory.getLogger("MappedFileManager");
+    private static final Logger log = LoggerFactory.getLogger(LogName.MAPPED_FILE_MANAGER);
     public final String instanceName;
     public final String bucketName;
     //从这个位点开始创建文件
@@ -59,11 +55,6 @@ public class MappedFileManager {
     //文件水位线，活跃文件超过这个水位线会分配新的线程去创建新的文件
     public final long fileWaterMark;
 
-    // Bucket元数据文件名字
-    private static final String META_FILE_NAME = "bucketMeta";
-    // bucket元数据文件大小4KB
-    private static final long META_FILE_SIZE = 4 * 1024;
-
     //到达水位线 创建新文件的时候都会使用这个线程池
     private static final ExecutorService createNewFileExecutor = Executors.newSingleThreadExecutor();
 
@@ -80,6 +71,9 @@ public class MappedFileManager {
     private Thread flushFileReadPositionThread;
     private volatile boolean flushFileReadPositionThreadState = true;
 
+    //bucket元数据mmp
+    private final Arena bucketMetaFileArena;
+    private final MemorySegment bucketMetaFileSegment;
 
 
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config, long fromOffset) {
@@ -91,7 +85,8 @@ public class MappedFileManager {
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
-        this.saveBucketMeta(new MetaInfo(config.walFileSize, config.blockSize, config.s3KeyPrefix));//保存该bucket的元数据
+        this.bucketMetaFileArena = Arena.ofShared();
+        bucketMetaFileSegment = BucketMetaInfoUtil.createAndMapBucketMetaFile(new BucketMetaInfo(config.blockSize, config.walFileSize, config.s3KeyPrefix), Path.of(dirPath), bucketMetaFileArena);//保存该bucket的元数据
         this.chackMappedFileTime = config.chackMappedFileTime;
         this.chackMappedFileThread = new Thread(this::chackMappedFileTask);
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
@@ -216,55 +211,6 @@ public class MappedFileManager {
         }
     }
 
-    //保存该bucket的元数据
-    private void saveBucketMeta(MetaInfo metaInfo) {
-        Path metaPath = Path.of(dirPath, META_FILE_NAME);
-        try (Arena arena = Arena.ofConfined();
-             FileChannel fileChannel = FileChannel.open(
-                     metaPath,
-                     StandardOpenOption.CREATE,
-                     StandardOpenOption.READ,
-                     StandardOpenOption.WRITE,
-                     StandardOpenOption.TRUNCATE_EXISTING)) {
-            // 创建父目录
-            Files.createDirectories(metaPath.getParent());
-            // 固定文件大小
-            fileChannel.truncate(META_FILE_SIZE);
-            MemorySegment segment = fileChannel.map(
-                    FileChannel.MapMode.READ_WRITE,
-                    0,
-                    META_FILE_SIZE,
-                    arena
-            );
-            long pos = 0;
-            //fileSize
-            segment.set(ValueLayout.JAVA_LONG, pos, metaInfo.getFileSize());
-            pos += 8;
-            //blockSize
-            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getBlockSize());
-            pos += 4;
-            // CRC
-            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getCrc());
-            pos += 4;
-            // dataLen
-            segment.set(ValueLayout.JAVA_INT, pos, metaInfo.getDataLen());
-            pos += 4;
-            // data
-            MemorySegment.copy(
-                    metaInfo.getData(),
-                    0,
-                    segment,
-                    ValueLayout.JAVA_BYTE,
-                    pos,
-                    metaInfo.getDataLen()
-            );
-            // 强制刷盘
-            segment.force();
-        } catch (Exception e) {
-            log.warn("saveBucketMeta method failed,create bucketMeta failed", e);
-        }
-    }
-
 
     //检查WAL文件的生命周期，
     private void chackMappedFileTask() {
@@ -287,12 +233,10 @@ public class MappedFileManager {
             if (!values.isEmpty()) {
                 for (DefaultMappedFile file : values) {
                     if (file.canClean()) {
+                        //清除资源
                         file.clean();
-                        continue;
-                    }
-                    if (file.canDelete()) {
+                        //删除文件
                         file.delete();
-                        continue;
                     }
                 }
             }
@@ -362,10 +306,35 @@ public class MappedFileManager {
         return activeMappedFile;
     }
 
+    public void closeAllFile() {
+        mappedFiles.values().forEach(MappedFiledReferenceResource::close);
+    }
+
+    //打断线程，让线程执行最后一次
+    public void endFlushFileReadPosition() {
+        flushFileReadPositionThread.interrupt();
+    }
+
+    public void endMetaFlush() {
+        fileMetaFlushThread.interrupt();
+    }
+
+    public void endChackMappedFile() {
+        chackMappedFileThread.interrupt();
+    }
+
 
     //todo
     public void close() {
 
+    }
+
+    public boolean hasMappedFile() {
+        return !mappedFiles.isEmpty();
+    }
+
+    public MemorySegment getBucketMetaFileSegment() {
+        return bucketMetaFileSegment;
     }
 }
 

@@ -54,6 +54,7 @@ public class CacheBlockUpdater {
                 // 3. 必须先抢到网络准入令牌，抢不到的虚拟线程会被 JVM 自动、高效地卸载挂起
                 upLoadLimiter.acquire();
                 block.getReference();
+                manager.upCount.incrementAndGet();
                 //先将元数据改为上传中
                 long fileFromOffset = block.getFileFromOffset();
                 int logicalIndex = block.getLogicalIndex();
@@ -83,6 +84,7 @@ public class CacheBlockUpdater {
                 handleUploadFailure(block);
             } finally {
                 // 4. 无论成功失败，释放令牌，让下一个块上云
+                manager.upCount.incrementAndGet();
                 block.releaseReference();
                 upLoadLimiter.release();
             }

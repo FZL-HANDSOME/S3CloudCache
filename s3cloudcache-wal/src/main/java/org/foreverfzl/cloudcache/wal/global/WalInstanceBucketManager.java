@@ -77,6 +77,11 @@ public class WalInstanceBucketManager {
         }
     }
 
+    public MappedFileManager onlyGetFileManager(String bucketName) {
+        MappedFileManager fileManager = managerHashMap.get(bucketName);
+        return fileManager;
+    }
+
     //默认开始文件的起始位点为0
     public MappedFileManager getOrCreateBucketFileManager(String bucketName) {
         return this.getOrCreateBucketFileManager(bucketName, 0L);

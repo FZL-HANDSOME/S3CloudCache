@@ -18,6 +18,8 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 用于管理一个Bucket的所有Block，也可以理解为那个默认1GB的堆外缓冲区，也就是Block池
@@ -46,6 +48,9 @@ public class CacheBlockManager {
 
     //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
+
+    //正在上传的数量
+    protected AtomicInteger upCount = new AtomicInteger(0);
 
     //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
     private volatile boolean active = true;
@@ -185,13 +190,24 @@ public class CacheBlockManager {
     /**
      * 上传所有封口的Block
      */
-    public void updateAllBlock() {
+    public void updateAllBlock(long deadLine) {
         for (Map.Entry<Long, CloudCacheBlock> entry : keyBlockMap.entrySet()) {
             Long key = entry.getKey();
             if (!blockMetaDataManager.isSealed(key)) {
                 continue;
             }
-            blockUpdater.upLoadBlock(entry.getValue());
+            updateBlock(entry.getValue());
+        }
+        while (upCount.get() != 0) {
+            try {
+                if (System.currentTimeMillis() >= deadLine) {
+                    return;
+                }
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
     }
 
