@@ -121,6 +121,11 @@ public class WalInstanceBucketManager {
     }
 
     public void close() {
-        checkBlockMetaExecutor.close();
+        //关闭定时线程池
+        checkBlockMetaExecutor.shutdownNow();
+        //关闭自己维护的bucketManager
+        managerHashMap.forEach((bucketName, fileManager) -> {
+            fileManager.close();
+        });
     }
 }

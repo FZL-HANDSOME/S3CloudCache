@@ -8,8 +8,10 @@ import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
 import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
+import org.foreverfzl.cloudcache.wal.Util.FileMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
@@ -37,6 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
@@ -72,17 +75,12 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
 
     private final S3Client s3Client;
 
-    //数据恢复线程池
-    private ExecutorService recoverExecutorService = null;
-
 
     public S3CloudCacheInstance(S3Client s3Client, S3CloudCacheConfig config) {
         this.s3Client = s3Client;
         this.config = config;
         this.instanceName = config.instanceName;
-        config.walPath = config.walPath != null ?
-                config.walPath + ProjectUtil.WAL_FILE_ADDRESS :
-                ProjectUtil.USER_HOME + ProjectUtil.WAL_FILE_ADDRESS;
+        config.walPath = config.walPath != null ? config.walPath + ProjectUtil.WAL_FILE_ADDRESS : ProjectUtil.USER_HOME + ProjectUtil.WAL_FILE_ADDRESS;
         walInstanceBucketManager = new WalInstanceBucketManager(instanceName, config);
         coreInstanceBucketManager = new CoreInstanceBucketManager(instanceName, s3Client, config);
     }
@@ -122,34 +120,55 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             throw new CloudCacheException("data can not be null");
         }
 
-        PutObjectRequest request = PutObjectRequest.builder()
-                .bucket(bucketName)
-                .key(s3Key)
-                .build();
+        PutObjectRequest request = PutObjectRequest.builder().bucket(bucketName).key(s3Key).build();
         PutObjectResponse response = s3Client.putObject(request, RequestBody.fromByteBuffer(data.asByteBuffer()));
         return response;
     }
 
-    //start负责扫描目录、恢复数据等
     public void start() {
-        //1：检查指定目录下instanceName的所有目录和文件,方法结束后所有的东西都恢复到结束前的状态，并且recoverBucketsMap填写好
-        try (Stream<Path> list = Files.list(Paths.get(config.walPath + File.separator + instanceName))) {
+        Path instancePath = Paths.get(config.walPath, instanceName);
+        if (!Files.exists(instancePath)) {
+            return;
+        }
+
+        try (Stream<Path> list = Files.list(instancePath)) {
             List<Path> bucketPathList = list.toList();
             int bucketCount = bucketPathList.size();
-            recoverExecutorService = Executors.newFixedThreadPool(bucketCount);
-            for (Path path : bucketPathList) {
-                String bucketName = path.getFileName().toString();
-                BucketConfig bucketConfig = config.getBucketConfig(bucketName);
-                this.chackDirectoryAndFile(path, bucketName, bucketConfig);
+            if (bucketCount == 0) {
+                return;
             }
 
-        } catch (Exception e) {
+            int threadCount = Math.min(bucketCount, Runtime.getRuntime().availableProcessors() * 2);
+            ExecutorService recoverExecutorService = Executors.newFixedThreadPool(threadCount);
 
+            List<CompletableFuture<Void>> futures = new ArrayList<>(bucketCount);
+
+            for (Path path : bucketPathList) {
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                    String bucketName = path.getFileName().toString();
+                    BucketConfig bucketConfig = config.getBucketConfig(bucketName);
+                    this.chackDirectoryAndFile(path, bucketName, bucketConfig);
+                }, recoverExecutorService).exceptionally(ex -> {
+                    log.error("Async recover failed for path: {}", path, ex);
+                    return null;
+                });
+                futures.add(future);
+            }
+            // 绑定异步终结回调：当所有子任务全部完成（无论成功或失败）后，自动关闭线程池
+            // start() 方法不会在此处阻塞
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .whenComplete((unused, throwable) -> {
+                        log.info("All buckets recovery completed, shutting down recoverExecutorService.");
+                        recoverExecutorService.shutdown();
+                    });
+
+        } catch (Exception e) {
+            log.error("Start async recovery failed for instance: {}", instanceName, e);
         }
     }
 
     //恢复一个具体bucket中的数据
-    private void chackDirectoryAndFile(Path path, String bucketName, BucketConfig bucketConfig) throws IOException {
+    private void chackDirectoryAndFile(Path path, String bucketName, BucketConfig bucketConfig) {
         if (path == null || !Files.exists(path)) {
             throw new CloudCacheException("bucket directory not exists: " + path);
         }
@@ -187,9 +206,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         //获取所有的文件绝对地址
         try (Stream<Path> stream = Files.list(walPath)) {
             //根据文件名字进行排序
-            List<Path> walFiles = stream.filter(Files::isRegularFile)
-                    .sorted(Comparator.comparingLong(this::getFileFromOffset))
-                    .toList();
+            List<Path> walFiles = stream.filter(Files::isRegularFile).sorted(Comparator.comparingLong(this::getFileFromOffset)).toList();
             //没有文件也不进行数据恢复
             if (walFiles.isEmpty()) {
                 return;
@@ -199,17 +216,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
             CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
             //恢复wal目录下的数据
-            recoverExecutorService.execute(() -> {
-                recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix);
-            });
+            recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix);
         } catch (Exception e) {
 
         }
     }
 
     //恢复一个bucket中的文件
-    private void recoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager,
-                             long oldFileSize, int oldblockSize, String prefix) {
+    private void recoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager, long oldFileSize, int oldblockSize, String prefix) {
         CRC32 crc32 = new CRC32();
         //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
         long curPos = 0;
@@ -220,12 +234,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             File file = curPath.toFile();
             try {
                 //创建该文件的Java对象
-                DefaultMappedFile defaultMappedFile = new DefaultMappedFile(curPath.getParent().toString(), fileName, fileFromOffset, oldFileSize,
-                        file, oldblockSize, false, false, false, fileManager);
-                //先读取4KB的元数据区域，获取指针
-                long readPosition = defaultMappedFile.getLong(curPos);
-                curPos += 8;
-                long upLoadPosition = defaultMappedFile.getLong(curPos);
+                DefaultMappedFile defaultMappedFile = new DefaultMappedFile(curPath.getParent().toString(), fileName, fileFromOffset, oldFileSize, file, oldblockSize, false, false, false, fileManager);
+                //获取该文件对应的元数据
+                FileMetaInfo fileMetaInfo = FileMetaInfoUtil.getFileMetaInfo(defaultMappedFile);
+                if (fileMetaInfo == null) {
+                    continue;
+                }
+                long readPosition = fileMetaInfo.getReadPosition();
+                long upLoadPosition = fileMetaInfo.getUploadPosition();
                 defaultMappedFile.wrotePosition = readPosition;
                 defaultMappedFile.readPosition = readPosition;
                 defaultMappedFile.upLoadPosition = upLoadPosition;
@@ -284,48 +300,62 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         return Long.parseLong(path.getFileName().toString());
     }
 
-
+    @Override
     public void close(long walWriteWaitTime, long upLoadWaitTime) {
         long writeDeadline = System.currentTimeMillis() + walWriteWaitTime;
         Collection<BucketWriterWriter> writers = bucketWriters.values();
-        //创建虚拟线程处理任务
+        // 1. 利用 try-with-resources 自动管理虚拟线程池的生命周期
         try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (BucketWriterWriter writer : writers) {
                 closeExecutor.execute(() -> {
-                    //1；先将所有的bucket设置为关闭中，不可写入
-                    writer.stopWrite();
-                    //2：限时等待该writer完成写入
-                    writer.waitWriterFinished(writeDeadline);
-                    String bucketName = writer.getBucketName();
-                    CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
-                    MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
-                    //然后关闭所有的文件写入，关闭所有block的写入
-                    mappedFileManager.closeAllFile();
-                    //TODO
-                    //3：关闭所有的block的写入并且封口所有的block
-                    BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
-                    blockMetaDataManager.trySealAllBlock();
-                    //4：限时上传所有的block
-                    long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
-                    cacheBlockManager.updateAllBlock(upLoadDeadline);
-                    //5：刷新读指针(上传指针不用手动刷新，因为上传线程会自己刷新最新的位点)
-                    mappedFileManager.endFlushFileReadPosition();
-                    //6：强制刷新所有文件的元数据区域(本质只有含有脏数据的文件才刷新)
-                    mappedFileManager.endMetaFlush();
-                    //7：最后检查一遍文件
-                    mappedFileManager.endChackMappedFile();
-                    //8：看看是否有剩余的文件，如果没有文件了，则将bucketMeta文件的isDirty改为0
-                    if (!mappedFileManager.hasMappedFile()) {
-                        MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
-                        BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
+                    try {
+                        // 1：先将所有的 bucket 设置为关闭中，不可写入
+                        writer.stopWrite();
+                        // 2：限时等待该 writer 完成写入，然后关闭所有的文件写入和物理 block 的写入
+                        writer.waitWriterFinished(writeDeadline);
+                        String bucketName = writer.getBucketName();
+                        CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
+                        MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
+                        mappedFileManager.closeAllFile();
+                        cacheBlockManager.closeAllBlock();
+                        // 3：封口所有的 block
+                        BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
+                        blockMetaDataManager.trySealAllBlock();
+                        // 4：限时上传所有的 block
+                        long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
+                        cacheBlockManager.updateAllBlock(upLoadDeadline);
+                        // 5：刷新读指针
+                        mappedFileManager.endFlushFileReadPosition();
+                        // 6：强制刷新所有文件的元数据区域
+                        mappedFileManager.endMetaFlush();
+                        // 7：最后检查一遍文件，把能删除的文件删除
+                        mappedFileManager.endChackMappedFile();
+                        // 8：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
+                        if (!mappedFileManager.hasMappedFile()) {
+                            MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
+                            BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
+                        }
+                    } catch (Throwable t) {
+                        log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
                     }
-
                 });
             }
+        } //执行到这里时，Java 自动调用 closeExecutor.close()，主线程在此强行阻塞，直到所有虚拟线程全部执行完成
 
+        // 所有 Bucket 虚拟线程彻底执行完毕后，安全关闭底层 Manager 全局资源
+        try {
+            walInstanceBucketManager.close();
+        } catch (Exception e) {
+            log.error("Failed to close walInstanceBucketManager", e);
         }
 
-
+        try {
+            coreInstanceBucketManager.close();
+        } catch (Exception e) {
+            log.error("Failed to close coreInstanceBucketManager", e);
+        }
+        //关闭S3client
+        s3Client.close();
     }
 
 

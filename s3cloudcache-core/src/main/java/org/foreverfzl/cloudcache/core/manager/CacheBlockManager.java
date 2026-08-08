@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
+import org.foreverfzl.cloudcache.core.cache.CacheBlockReferenceResource;
 import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
@@ -16,6 +17,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -28,8 +30,10 @@ public class CacheBlockManager {
 
     private static final Logger log = LoggerFactory.getLogger(LogName.CACHE_BLOCK_MANAGER);
 
+    //管理的的堆外内存
     private final Arena arena;
     private final MemorySegment globalMemorySegment;
+
     private final int blockCount;
     public final String instanceName;
     public final String bucketName;
@@ -102,7 +106,7 @@ public class CacheBlockManager {
                 }
             } catch (InterruptedException e) {
                 active = false;
-                throw new RuntimeException(e);
+                break;
             }
         }
     }
@@ -136,6 +140,10 @@ public class CacheBlockManager {
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
             //将数据写入Block
+            //如果此时Block不能写入，则直接返回
+            if (!cacheBlock.isActive()) {
+                return AppendDataResult.fail(fileFromOffset, blockIndex);
+            }
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (!isSuccess) {
                 //失败后重试一次
@@ -185,6 +193,15 @@ public class CacheBlockManager {
     public void updateBlock(CloudCacheBlock cacheBlock) {
         //将block元数据设置为上传中
         blockUpdater.upLoadBlock(cacheBlock);
+    }
+
+    /**
+     * 关闭所有block的写入
+     */
+
+    public void closeAllBlock() {
+        freeBlocks.forEach(CacheBlockReferenceResource::setUnActive);
+        keyBlockMap.forEach((key, block) -> block.setUnActive());
     }
 
     /**
@@ -274,6 +291,9 @@ public class CacheBlockManager {
 
     //todo
     public void close() {
+        getBlockUpLoadQueueTaskThread.interrupt();
+        blockUpdater.close();
+        //关闭资源
         if (arena != null) {
             try {
                 arena.close();

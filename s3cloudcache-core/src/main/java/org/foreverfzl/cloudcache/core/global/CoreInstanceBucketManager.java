@@ -88,6 +88,8 @@ public class CoreInstanceBucketManager {
     }
 
     public void close() {
-
+        managerHashMap.forEach((cacheName, manager) -> {
+            manager.close();
+        });
     }
 }

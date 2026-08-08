@@ -2,6 +2,7 @@ package org.foreverfzl.cloudcache.wal.manager;
 
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
+import org.foreverfzl.cloudcache.wal.Util.FileMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
@@ -17,7 +18,6 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Map;
@@ -56,7 +56,7 @@ public class MappedFileManager {
     public final long fileWaterMark;
 
     //到达水位线 创建新文件的时候都会使用这个线程池
-    private static final ExecutorService createNewFileExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService createNewFileExecutor = Executors.newSingleThreadExecutor();
 
     //该bucket对应的Block元数据管理者
     public BlockMetaDataManager blockMetaDataManager;
@@ -266,27 +266,8 @@ public class MappedFileManager {
                 //如果不是脏数据则直接跳过
                 continue;
             }
-            try {
-                long readPos = mappedFile.readPosition;
-                long uploadPos = mappedFile.upLoadPosition;
-                // Use file creation time if needed; fall back to current time.
-                long updateTime = System.currentTimeMillis();
-                // Write into the first 4KB of the mapped file.
-                MemorySegment metaSegment = mappedFile.getMappedMemorySegmentSlice(0, FileMetaInfo.FILE_META_SIZE);
-                long pos = 0;
-                metaSegment.set(ValueLayout.JAVA_LONG, pos, readPos);
-                pos += Long.BYTES;
-                metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
-                pos += Long.BYTES;
-                metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
-                // Ensure durability.
-                metaSegment.force();
-                if (mappedFile.fileFromOffset == readPos && mappedFile.upLoadPosition == uploadPos) {
-                    DefaultMappedFile.DIRTY_UPDATER.compareAndSet(mappedFile, 1, 0);
-                }
-            } catch (Exception e) {
-                log.warn("flushFileMeta: failed to write meta for {}file offset ", mappedFile.getFileName(), e);
-            }
+            //刷新元数据
+            FileMetaInfoUtil.flushFileMetaInfo(mappedFile);
         }
     }
 
@@ -324,9 +305,99 @@ public class MappedFileManager {
     }
 
 
-    //todo
+    /**
+     * 仅关闭后台线程、线程池及堆外内存资源
+     */
     public void close() {
+        log.info("Closing MappedFileManager resources for instance: {}, bucket: {}", instanceName, bucketName);
 
+        // 1. 终止并等待 3 个后台 Worker 线程退出
+        stopBackgroundThreads();
+
+        // 2. 释放跳表及 activeMappedFile 中的 DefaultMappedFile 内存引用与句柄
+        closeMappedFiles();
+
+        // 3. 卸载 Bucket 级 FFM (Foreign Function & Memory) 堆外内存区域
+        closeBucketMetaArena();
+
+        // 4. 关闭线程池
+        closeThreadPool();
+
+        log.info("MappedFileManager resources closed successfully for bucket: {}", bucketName);
+    }
+
+    /**
+     * 第一步：停止 3 个后台刷新/检查线程
+     */
+    private void stopBackgroundThreads() {
+        // 修改 volatile 标志位
+        this.chackMappedFileThreadState = false;
+        this.fileMetaFlushThreadState = false;
+        this.flushFileReadPositionThreadState = false;
+
+        // 打断 sleep 状态并等待线程彻底终止
+        interruptAndJoin(chackMappedFileThread, "chackMappedFileThread");
+        interruptAndJoin(fileMetaFlushThread, "fileMetaFlushThread");
+        interruptAndJoin(flushFileReadPositionThread, "flushFileReadPositionThread");
+    }
+
+    private void interruptAndJoin(Thread thread, String name) {
+        if (thread != null && thread.isAlive()) {
+            thread.interrupt();
+            try {
+                thread.join(3000); // 限时等待 3 秒，防止死锁卡死主线程
+            } catch (InterruptedException e) {
+                log.warn("Interrupted while waiting for thread [{}] to terminate", name);
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * 第二步：关闭并清理所有 DefaultMappedFile 的内存与句柄
+     */
+    private void closeMappedFiles() {
+        for (DefaultMappedFile mappedFile : mappedFiles.values()) {
+            if (mappedFile != null) {
+                try {
+                    mappedFile.clean(); // 关闭底层 MappedByteBuffer / MemorySegment 映射
+                } catch (Exception e) {
+                    log.error("Failed to close MappedFile in bucket: {}", bucketName, e);
+                }
+            }
+        }
+        activeMappedFile.set(null);
+        mappedFiles.clear();
+    }
+
+    /**
+     * 第三步：释放 JDK 21+ FFM Arena 堆外物理内存
+     */
+    private void closeBucketMetaArena() {
+        if (bucketMetaFileArena != null) {
+            try {
+                bucketMetaFileArena.close(); // 触发底层的 unmap，立即释放物理内存映射
+            } catch (Exception e) {
+                log.error("Failed to close bucketMetaFileArena for bucket: {}", bucketName, e);
+            }
+        }
+    }
+
+    /**
+     * 第四步：关闭文件创建线程池
+     */
+    private void closeThreadPool() {
+        if (!createNewFileExecutor.isShutdown()) {
+            createNewFileExecutor.shutdown();
+            try {
+                if (!createNewFileExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                    createNewFileExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                createNewFileExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     public boolean hasMappedFile() {

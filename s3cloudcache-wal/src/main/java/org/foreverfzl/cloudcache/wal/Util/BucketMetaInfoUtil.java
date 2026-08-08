@@ -81,42 +81,50 @@ public class BucketMetaInfoUtil {
         }
     }
 
-    public static BucketMetaInfo readBucketMetaFile(Path dirPath) throws IOException {
-        Path bucketMetaPath = dirPath.resolve(META_FILE_NAME);
-        if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
-            return null;
-        }
-        byte[] metaBytes = Files.readAllBytes(bucketMetaPath);
-        MemorySegment segment = MemorySegment.ofArray(metaBytes);
-        long pos = 0;
-        //读取isDirty
-        int isDirty = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 blockSize (int, 4 bytes)
-        int oldblockSize = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 fileSize (long, 8 bytes)
-        long oldFileSize = segment.get(ValueLayout.JAVA_LONG, pos);
-        pos += 8;
-        // 读取 CRC (int, 4 bytes)
-        int crc = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 dataLen (int, 4 bytes)
-        int dataLen = segment.get(ValueLayout.JAVA_INT, pos);
-        pos += 4;
-        // 读取 data (byte[])
-        byte[] data = new byte[dataLen];
-        MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
-        //校验数据
-        CRC32 crc32 = new CRC32();
-        crc32.update(Math.toIntExact(oldFileSize));
-        crc32.update(oldblockSize);
-        crc32.update(dataLen);
-        crc32.update(data);
-        //bucketMeta文件损坏，以前的文件无法恢复
-        if ((int) crc32.getValue() != crc) {
-            log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", bucketMetaPath);
-            return null;
+    public static BucketMetaInfo readBucketMetaFile(Path dirPath) {
+        int isDirty = 0;
+        int oldblockSize = 0;
+        long oldFileSize = 0;
+        byte[] data = null;
+        try {
+            Path bucketMetaPath = dirPath.resolve(META_FILE_NAME);
+            if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
+                return null;
+            }
+            byte[] metaBytes = Files.readAllBytes(bucketMetaPath);
+            MemorySegment segment = MemorySegment.ofArray(metaBytes);
+            long pos = 0;
+            //读取isDirty
+            isDirty = segment.get(ValueLayout.JAVA_INT, pos);
+            pos += 4;
+            // 读取 blockSize (int, 4 bytes)
+            oldblockSize = segment.get(ValueLayout.JAVA_INT, pos);
+            pos += 4;
+            // 读取 fileSize (long, 8 bytes)
+            oldFileSize = segment.get(ValueLayout.JAVA_LONG, pos);
+            pos += 8;
+            // 读取 CRC (int, 4 bytes)
+            int crc = segment.get(ValueLayout.JAVA_INT, pos);
+            pos += 4;
+            // 读取 dataLen (int, 4 bytes)
+            int dataLen = segment.get(ValueLayout.JAVA_INT, pos);
+            pos += 4;
+            // 读取 data (byte[])
+            data = new byte[dataLen];
+            MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
+            //校验数据
+            CRC32 crc32 = new CRC32();
+            crc32.update(Math.toIntExact(oldFileSize));
+            crc32.update(oldblockSize);
+            crc32.update(dataLen);
+            crc32.update(data);
+            //bucketMeta文件损坏，以前的文件无法恢复
+            if ((int) crc32.getValue() != crc) {
+                log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", bucketMetaPath);
+                return null;
+            }
+        } catch (Exception e) {
+            log.error("readBucketMetaFile failed, path is {} ", dirPath, e);
         }
         return new BucketMetaInfo(isDirty, oldblockSize, oldFileSize, data);
     }

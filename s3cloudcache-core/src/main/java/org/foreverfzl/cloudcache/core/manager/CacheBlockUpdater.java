@@ -79,6 +79,8 @@ public class CacheBlockUpdater {
                 if (!isSuccess) {
                     throw new CoreException("Failed to upload block");
                 }
+            }catch (InterruptedException e){
+                Thread.currentThread().interrupt();
             } catch (Exception t) {
                 log.warn("Exception is={},instance={},bucket={},block=>{}", t, manager.instanceName, manager.bucketName, block);
                 handleUploadFailure(block);
@@ -134,6 +136,6 @@ public class CacheBlockUpdater {
     }
 
     public void close() {
-        s3VirtualExecutor.shutdown();
+        s3VirtualExecutor.shutdownNow();
     }
 }

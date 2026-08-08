@@ -8,7 +8,25 @@ public class FileMetaInfo {
     public static final long FILE_META_SIZE = 4 * 1024;
 
     //元数据区域严格按照下面的结构
-    private long readPosition;
-    private long uploadPosition;
-    private long updateTime;
+    private final long readPosition;
+    private final long uploadPosition;
+    private final long updateTime;
+
+    public FileMetaInfo(long readPosition, long uploadPosition, long updateTime) {
+        this.readPosition = readPosition;
+        this.uploadPosition = uploadPosition;
+        this.updateTime = updateTime;
+    }
+
+    public long getReadPosition() {
+        return readPosition;
+    }
+
+    public long getUploadPosition() {
+        return uploadPosition;
+    }
+
+    public long getUpdateTime() {
+        return updateTime;
+    }
 }
