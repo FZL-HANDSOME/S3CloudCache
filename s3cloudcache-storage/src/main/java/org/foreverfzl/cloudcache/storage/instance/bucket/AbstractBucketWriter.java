@@ -1,6 +1,5 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
-import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.storage.instance.WriteResult;
 
 import java.nio.ByteBuffer;

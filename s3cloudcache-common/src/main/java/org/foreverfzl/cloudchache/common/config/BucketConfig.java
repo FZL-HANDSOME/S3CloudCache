@@ -1,6 +1,9 @@
 package org.foreverfzl.cloudchache.common.config;
 
-import org.foreverfzl.cloudchache.common.cloudcahceEnum.*;
+import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockSizeLevel;
+import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockUploadConcurrencyLevel;
+import org.foreverfzl.cloudchache.common.cloudcahceEnum.CacheSizeLevel;
+import org.foreverfzl.cloudchache.common.cloudcahceEnum.WalFileSize;
 
 public class BucketConfig {
     /**

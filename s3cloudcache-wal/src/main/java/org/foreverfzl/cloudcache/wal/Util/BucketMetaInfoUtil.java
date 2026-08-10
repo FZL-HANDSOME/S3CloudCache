@@ -6,12 +6,11 @@ import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
+import java.io.InputStream;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -27,7 +26,7 @@ public class BucketMetaInfoUtil {
     private static final String META_FILE_NAME = "bucketMeta";
 
     // bucket元数据文件大小4KB
-    private static final long META_FILE_SIZE = 4 * 1024;
+    private static final int META_FILE_SIZE = 4 * 1024;
 
 
     /**
@@ -91,40 +90,54 @@ public class BucketMetaInfoUtil {
             if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
                 return null;
             }
-            byte[] metaBytes = Files.readAllBytes(bucketMetaPath);
+            // 仅读取文件前 4KB (4096 字节)
+            byte[] metaBytes;
+            try (InputStream in = Files.newInputStream(bucketMetaPath)) {
+                metaBytes = in.readNBytes(META_FILE_SIZE);
+            }
+
             MemorySegment segment = MemorySegment.ofArray(metaBytes);
             long pos = 0;
-            //读取isDirty
-            isDirty = segment.get(ValueLayout.JAVA_INT, pos);
+
+            // 1. 读取 isDirty (使用 JAVA_INT_UNALIGNED)
+            isDirty = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
             pos += 4;
-            // 读取 blockSize (int, 4 bytes)
-            oldblockSize = segment.get(ValueLayout.JAVA_INT, pos);
+
+            // 2. 读取 blockSize (使用 JAVA_INT_UNALIGNED)
+            oldblockSize = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
             pos += 4;
-            // 读取 fileSize (long, 8 bytes)
-            oldFileSize = segment.get(ValueLayout.JAVA_LONG, pos);
+
+            // 3. 读取 fileSize (使用 JAVA_LONG_UNALIGNED)
+            oldFileSize = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, pos);
             pos += 8;
-            // 读取 CRC (int, 4 bytes)
-            int crc = segment.get(ValueLayout.JAVA_INT, pos);
+
+            // 4. 读取 CRC (使用 JAVA_INT_UNALIGNED)
+            int crc = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
             pos += 4;
-            // 读取 dataLen (int, 4 bytes)
-            int dataLen = segment.get(ValueLayout.JAVA_INT, pos);
+
+            // 5. 读取 dataLen (使用 JAVA_INT_UNALIGNED)
+            int dataLen = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
             pos += 4;
-            // 读取 data (byte[])
+
+            // 6. 读取 data (byte[])
             data = new byte[dataLen];
             MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
-            //校验数据
+            // 校验数据 CRC
             CRC32 crc32 = new CRC32();
-            crc32.update(Math.toIntExact(oldFileSize));
+            crc32.update(isDirty);
             crc32.update(oldblockSize);
+            crc32.update(Math.toIntExact(oldFileSize));
             crc32.update(dataLen);
             crc32.update(data);
-            //bucketMeta文件损坏，以前的文件无法恢复
+
+            // bucketMeta 文件损坏，以前的文件无法恢复
             if ((int) crc32.getValue() != crc) {
-                log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is{}", bucketMetaPath);
+                log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is {}", bucketMetaPath);
                 return null;
             }
         } catch (Exception e) {
             log.error("readBucketMetaFile failed, path is {} ", dirPath, e);
+            return null;
         }
         return new BucketMetaInfo(isDirty, oldblockSize, oldFileSize, data);
     }

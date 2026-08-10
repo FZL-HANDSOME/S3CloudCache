@@ -28,22 +28,19 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 import java.util.zip.CRC32;
 
@@ -125,6 +122,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         return response;
     }
 
+    //启动数据恢复
     public void start() {
         Path instancePath = Paths.get(config.walPath, instanceName);
         if (!Files.exists(instancePath)) {
@@ -307,25 +305,26 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         // 1. 利用 try-with-resources 自动管理虚拟线程池的生命周期
         try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (BucketWriterWriter writer : writers) {
-                closeExecutor.execute(() -> {
+//                closeExecutor.execute(() -> {
                     try {
                         // 1：先将所有的 bucket 设置为关闭中，不可写入
-                        writer.stopWrite();
-                        // 2：限时等待该 writer 完成写入，然后关闭所有的文件写入和物理 block 的写入
+                        writer.close();
+                        // 2：限时等待该 writer 完成写入
                         writer.waitWriterFinished(writeDeadline);
                         String bucketName = writer.getBucketName();
                         CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
                         MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
-                        mappedFileManager.closeAllFile();
-                        cacheBlockManager.closeAllBlock();
                         // 3：封口所有的 block
                         BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
                         blockMetaDataManager.trySealAllBlock();
                         // 4：限时上传所有的 block
                         long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
                         cacheBlockManager.updateAllBlock(upLoadDeadline);
-                        // 5：刷新读指针
+                        //5：刷新读指针
                         mappedFileManager.endFlushFileReadPosition();
+                        //此时要真正的关闭文件、block，并且不允许指针进行改动，这样保证了6 7步骤的指针状态是一致的
+                        mappedFileManager.closeAllFile();
+                        cacheBlockManager.closeAllBlock();
                         // 6：强制刷新所有文件的元数据区域
                         mappedFileManager.endMetaFlush();
                         // 7：最后检查一遍文件，把能删除的文件删除
@@ -338,7 +337,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     } catch (Throwable t) {
                         log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
                     }
-                });
+//                });
             }
         } //执行到这里时，Java 自动调用 closeExecutor.close()，主线程在此强行阻塞，直到所有虚拟线程全部执行完成
 
@@ -355,7 +354,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             log.error("Failed to close coreInstanceBucketManager", e);
         }
         //关闭S3client
-        s3Client.close();
+        if (s3Client != null) s3Client.close();
     }
 
 

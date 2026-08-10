@@ -1,7 +1,6 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
-import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;

@@ -1,9 +1,7 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 
-import java.lang.foreign.MemorySegment;
 import java.nio.channels.FileChannel;
 
 public interface MappedFile {

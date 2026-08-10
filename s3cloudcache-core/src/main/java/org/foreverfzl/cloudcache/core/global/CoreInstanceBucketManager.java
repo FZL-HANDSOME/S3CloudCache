@@ -1,12 +1,9 @@
 package org.foreverfzl.cloudcache.core.global;
 
-import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
-import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
-import org.foreverfzl.cloudchache.common.exception.WalException;
 import software.amazon.awssdk.services.s3.S3Client;
 
 import java.util.concurrent.ConcurrentHashMap;

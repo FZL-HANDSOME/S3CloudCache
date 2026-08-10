@@ -19,7 +19,6 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
@@ -39,7 +38,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public static final AtomicLongFieldUpdater<DefaultMappedFile> UPLOAD_POSITION_UPDATER;
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> IS_CREATE_NEW_FILE;
 
-
+    public volatile boolean posActive; //该属性决定所有的指针是否可以更新
     public volatile long fileFromOffset;
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
@@ -95,6 +94,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
                              final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory,
                              boolean isCreateFile, MappedFileManager manager) {
+        this.posActive = true;
         this.fileName = fileName;
         this.fileSize = fileSize;
         this.fileFromOffset = fileFromOffset;
@@ -183,6 +183,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     public void ackReadPosition() {
         while (true) {
+            if (!posActive) return;
             int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
             //如果到了截至位置则直接退出不更新
             if (curReadBlockIndex == endBlockIndex) {
@@ -225,6 +226,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 3);
         //每个线程都去看一下是否能进行更新
         while (true) {
+            if (!posActive) return;
             // 在循环外固定当前要检查的索引
             int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
             //如果到了截至位置则直接退出不更新
@@ -430,7 +432,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
-            if(!isAvailable()){
+            if (!isAvailable()) {
                 throw new WalException("File is closed");
             }
             //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
@@ -456,7 +458,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             this.release();
         }
     }
-
 
 
     /**

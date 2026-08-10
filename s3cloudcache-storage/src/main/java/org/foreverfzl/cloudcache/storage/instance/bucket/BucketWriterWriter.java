@@ -164,16 +164,13 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                     crc.reset();
                 }
             } catch (InterruptedException interruptedException) {
+                active=false;
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
                 log.warn("getBlockBrokenTask failed=>", e);
             }
         }
-    }
-
-    public void stopWrite() {
-        this.state=WriterState.CLOSING;
     }
 
     //关闭的时候会触发
@@ -193,10 +190,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     }
 
 
-    //todo关闭资源
     public void close() {
-        mappedFileManager.close();
-        cacheBlockManager.close();
+        this.state=WriterState.CLOSING;
+        getBlockBrokenTaskThread.interrupt();
     }
 
 

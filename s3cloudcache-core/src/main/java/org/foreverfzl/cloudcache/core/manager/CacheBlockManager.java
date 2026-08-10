@@ -2,8 +2,8 @@ package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.cache.CacheBlockReferenceResource;
-import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
@@ -17,11 +17,11 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
-import java.util.Collection;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 用于管理一个Bucket的所有Block，也可以理解为那个默认1GB的堆外缓冲区，也就是Block池
@@ -31,8 +31,8 @@ public class CacheBlockManager {
     private static final Logger log = LoggerFactory.getLogger(LogName.CACHE_BLOCK_MANAGER);
 
     //管理的的堆外内存
-    private final Arena arena;
-    private final MemorySegment globalMemorySegment;
+    private Arena arena;
+    private MemorySegment globalMemorySegment;
 
     private final int blockCount;
     public final String instanceName;
@@ -85,7 +85,7 @@ public class CacheBlockManager {
         }
         if (isCreateThread) {
             this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
-            this.getBlockUpLoadQueueTaskThread.start();
+//            this.getBlockUpLoadQueueTaskThread.start();
         }
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
                 cacheSize, cacheBlockSize, blockCount, blockUpLoadCount);
@@ -106,6 +106,7 @@ public class CacheBlockManager {
                 }
             } catch (InterruptedException e) {
                 active = false;
+                Thread.currentThread().interrupt();
                 break;
             }
         }
@@ -297,6 +298,8 @@ public class CacheBlockManager {
         if (arena != null) {
             try {
                 arena.close();
+                arena = null;
+                globalMemorySegment = null;
                 log.info("Closed CacheBlockManager off-heap arena successfully.");
             } catch (Exception e) {
                 log.error("Failed to close CacheBlockManager arena", e);

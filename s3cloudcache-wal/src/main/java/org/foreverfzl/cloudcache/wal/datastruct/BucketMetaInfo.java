@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.wal.datastruct;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.zip.CRC32;
 
 /**
@@ -48,8 +49,9 @@ public class BucketMetaInfo {
      */
     public void updateCrc() {
         CRC32 crc32 = new CRC32();
-        crc32.update(Math.toIntExact(this.fileSize));
+        crc32.update(isDirty);
         crc32.update(this.blockSize);
+        crc32.update(Math.toIntExact(this.fileSize));
         crc32.update(dataLen);
         crc32.update(data);
         this.crc = (int) crc32.getValue();
@@ -77,5 +79,17 @@ public class BucketMetaInfo {
 
     public int getBlockSize() {
         return blockSize;
+    }
+
+    @Override
+    public String toString() {
+        return "BucketMetaInfo{" +
+                "isDirty=" + isDirty +
+                ", blockSize=" + blockSize +
+                ", fileSize=" + fileSize +
+                ", crc=" + crc +
+                ", dataLen=" + dataLen +
+                ", data=" + Arrays.toString(data) +
+                '}';
     }
 }

@@ -2,7 +2,6 @@ package org.foreverfzl.cloudcache.metadata.entity;
 
 
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 public class BlockMetaData {
 

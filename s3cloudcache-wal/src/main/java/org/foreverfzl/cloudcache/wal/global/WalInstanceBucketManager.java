@@ -1,21 +1,20 @@
 package org.foreverfzl.cloudcache.wal.global;
 
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
-import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
-import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
-import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
-import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.util.Collection;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -49,7 +48,7 @@ public class WalInstanceBucketManager {
         for (int i = 0; i < LOCKS_COUNT; i++) {
             locks[i] = new ReentrantLock();
         }
-        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 15, TimeUnit.SECONDS);
+//        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 15, TimeUnit.SECONDS);
     }
 
     private void checkBlockMeta() {
@@ -106,7 +105,7 @@ public class WalInstanceBucketManager {
                 return manager;
             }
             // 创建新的MappedFileManager
-            String managerDirPath = File.separator + bucketName;
+            String managerDirPath = instanceDirPath + File.separator + bucketName;
             manager = new MappedFileManager(managerDirPath, instanceName, bucketName, config.getBucketConfig(bucketName), fromOffset);
             managerHashMap.put(bucketName, manager);
             return manager;

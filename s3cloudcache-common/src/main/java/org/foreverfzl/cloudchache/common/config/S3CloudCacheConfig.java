@@ -1,7 +1,5 @@
 package org.foreverfzl.cloudchache.common.config;
 
-import org.foreverfzl.cloudchache.common.cloudcahceEnum.*;
-
 import java.util.HashMap;
 import java.util.Map;
 

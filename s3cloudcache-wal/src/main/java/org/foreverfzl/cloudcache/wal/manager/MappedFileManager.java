@@ -3,17 +3,14 @@ package org.foreverfzl.cloudcache.wal.manager;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.Util.FileMetaInfoUtil;
-import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
+import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
-import org.foreverfzl.cloudcache.wal.storefile.MappedFiledReferenceResource;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 
 import java.io.File;
 import java.lang.foreign.Arena;
@@ -21,7 +18,10 @@ import java.lang.foreign.MemorySegment;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 
@@ -63,17 +63,17 @@ public class MappedFileManager {
 
     private final int flushFileMetaTime;
     //刷新文件元数据的线程，将文件的各个信息写入到对应文件的开头4KB
-    private Thread fileMetaFlushThread;
+    private final Thread fileMetaFlushThread;
     private volatile boolean fileMetaFlushThreadState = true;
 
     //刷新所有文件的读指针，默认5S
     private final int flushReadPositionTime = 5000;
-    private Thread flushFileReadPositionThread;
+    private final Thread flushFileReadPositionThread;
     private volatile boolean flushFileReadPositionThreadState = true;
 
     //bucket元数据mmp
-    private final Arena bucketMetaFileArena;
-    private final MemorySegment bucketMetaFileSegment;
+    private Arena bucketMetaFileArena;
+    private MemorySegment bucketMetaFileSegment;
 
 
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config, long fromOffset) {
@@ -98,9 +98,9 @@ public class MappedFileManager {
 
     //启动线程，创建初始文件等
     private void init() {
-//        chackMappedFileThread.start();
-//        fileMetaFlushThread.start();
-//        flushFileReadPositionThread.start();
+        chackMappedFileThread.start();
+        fileMetaFlushThread.start();
+        flushFileReadPositionThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
         DefaultMappedFile startFile = synCreateMappedFile(fromOffset);
         activeMappedFile.compareAndSet(null, startFile);
@@ -287,8 +287,14 @@ public class MappedFileManager {
         return activeMappedFile;
     }
 
+    //只有项目关闭时才会调用
     public void closeAllFile() {
-        mappedFiles.values().forEach(MappedFiledReferenceResource::close);
+        mappedFiles.values().forEach((defaultMappedFile -> {
+            //关闭文件
+            defaultMappedFile.close();
+            //禁止指针的更新
+            defaultMappedFile.posActive = false;
+        }));
     }
 
     //打断线程，让线程执行最后一次
@@ -311,9 +317,6 @@ public class MappedFileManager {
     public void close() {
         log.info("Closing MappedFileManager resources for instance: {}, bucket: {}", instanceName, bucketName);
 
-        // 1. 终止并等待 3 个后台 Worker 线程退出
-        stopBackgroundThreads();
-
         // 2. 释放跳表及 activeMappedFile 中的 DefaultMappedFile 内存引用与句柄
         closeMappedFiles();
 
@@ -326,32 +329,6 @@ public class MappedFileManager {
         log.info("MappedFileManager resources closed successfully for bucket: {}", bucketName);
     }
 
-    /**
-     * 第一步：停止 3 个后台刷新/检查线程
-     */
-    private void stopBackgroundThreads() {
-        // 修改 volatile 标志位
-        this.chackMappedFileThreadState = false;
-        this.fileMetaFlushThreadState = false;
-        this.flushFileReadPositionThreadState = false;
-
-        // 打断 sleep 状态并等待线程彻底终止
-        interruptAndJoin(chackMappedFileThread, "chackMappedFileThread");
-        interruptAndJoin(fileMetaFlushThread, "fileMetaFlushThread");
-        interruptAndJoin(flushFileReadPositionThread, "flushFileReadPositionThread");
-    }
-
-    private void interruptAndJoin(Thread thread, String name) {
-        if (thread != null && thread.isAlive()) {
-            thread.interrupt();
-            try {
-                thread.join(3000); // 限时等待 3 秒，防止死锁卡死主线程
-            } catch (InterruptedException e) {
-                log.warn("Interrupted while waiting for thread [{}] to terminate", name);
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
 
     /**
      * 第二步：关闭并清理所有 DefaultMappedFile 的内存与句柄
@@ -360,7 +337,7 @@ public class MappedFileManager {
         for (DefaultMappedFile mappedFile : mappedFiles.values()) {
             if (mappedFile != null) {
                 try {
-                    mappedFile.clean(); // 关闭底层 MappedByteBuffer / MemorySegment 映射
+                    mappedFile.clean();
                 } catch (Exception e) {
                     log.error("Failed to close MappedFile in bucket: {}", bucketName, e);
                 }
@@ -377,6 +354,8 @@ public class MappedFileManager {
         if (bucketMetaFileArena != null) {
             try {
                 bucketMetaFileArena.close(); // 触发底层的 unmap，立即释放物理内存映射
+                bucketMetaFileArena=null;
+                bucketMetaFileSegment = null;
             } catch (Exception e) {
                 log.error("Failed to close bucketMetaFileArena for bucket: {}", bucketName, e);
             }
@@ -390,7 +369,7 @@ public class MappedFileManager {
         if (!createNewFileExecutor.isShutdown()) {
             createNewFileExecutor.shutdown();
             try {
-                if (!createNewFileExecutor.awaitTermination(3, TimeUnit.SECONDS)) {
+                if (!createNewFileExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
                     createNewFileExecutor.shutdownNow();
                 }
             } catch (InterruptedException e) {
