@@ -40,6 +40,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public volatile boolean posActive; //该属性决定所有的指针是否可以更新
     public volatile long fileFromOffset;
+    //这些读写指针等都是基于filesize从0位置开始的
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
@@ -93,7 +94,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
                              final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory,
-                              MappedFileManager manager) {
+                             MappedFileManager manager) {
         this.posActive = true;
         this.fileName = fileName;
         this.fileSize = fileSize;
@@ -125,7 +126,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             throw new WalException("fileSize must be greater than 0");
         }
         // 创建目录
-        File file = new File(dirPath,fileName);
+        File file = new File(dirPath, fileName);
         //文件不存在则创建
         return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, file, blockSize, isWarm, isLockMemory, manager);
     }
@@ -149,13 +150,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // 2. 以 "rw" 读写模式打开文件句柄
             // 说明：RandomAccessFile 在 "rw" 模式下，若文件存在则直接打开且【不会覆盖/清空原数据】；若不存在则自动创建 0 字节文件。
             RandomAccessFile randomAccessFile = new RandomAccessFile(file, "rw");
-            if (!fileExists) {
-                // 情况 A：新文件 -> 显式扩张物理文件到指定的 fileSize 大小
-                randomAccessFile.setLength(fileSize);
+            long physicalFileSize = FileMetaInfo.FILE_META_SIZE + fileSize;
+            if (randomAccessFile.length() < physicalFileSize) {
+                // 文件由“4KB 元数据区 + fileSize 数据区”组成。
+                randomAccessFile.setLength(physicalFileSize);
             }
             // 3. 获取 FileChannel 并完成内存映射
             fileChannel = randomAccessFile.getChannel();
-            mappedMemorySegment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, fileSize, arena);
+            mappedMemorySegment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, physicalFileSize, arena);
             // 4. 按需预热
             if (isWarm) {
                 // 进行文件预热，每 16384 页（64MB）刷盘一次，防止脏页过多
@@ -170,7 +172,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     /**
-     * 推进read指针的更新
+     * 推进read指针的更新，目前read指针的更新没有涉及到多线程争抢
      */
     public void ackReadPosition() {
         while (true) {
@@ -186,24 +188,18 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 break;
             }
             long curReadPosition = READ_POSITION_UPDATER.get(this);
-            long expectedNewPosition = (long) (curReadBlockIndex + 1) * blockSize;
-            //然后开始force刷盘
+            long expectedNewPosition = (curReadBlockIndex + 1L) * blockSize;
             int count = (int) ProjectUtil.divideByPower(blockSize, forceSize);
             MemorySegment target = null;
             long curPos = curReadPosition;
             for (int i = 0; i < count; i++) {
-                target = mappedMemorySegment.asSlice(curPos, fileSize);
+                target = mappedMemorySegment.asSlice(curPos, forceSize);
                 target.force();
-                curPos += fileSize;
+                curPos += forceSize;
             }
-            if (READ_POSITION_UPDATER.compareAndSet(this, curReadPosition, expectedNewPosition)) {
-                if (metaDirty == 0) DIRTY_UPDATER.compareAndSet(this, 0, 1);
-                // CAS 成功，原子递增索引
-                NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
-                continue;
-            } else {
-                break;
-            }
+            //刷盘成功更新指针
+            READ_POSITION_UPDATER.set(this, expectedNewPosition);
+            NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
         }
     }
 
@@ -233,8 +229,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // 尝试原子推进上传指针
             long curUpLoadPosition = UPLOAD_POSITION_UPDATER.get(this);
             long expectedNewPosition = (long) (currentIndex + 1) * blockSize;
+            if (curUpLoadPosition >= expectedNewPosition) {
+                break;
+            }
             if (UPLOAD_POSITION_UPDATER.compareAndSet(this, curUpLoadPosition, expectedNewPosition)) {
-                if (metaDirty == 0) DIRTY_UPDATER.compareAndSet(this, 0, 1);
+                if (metaDirty == 0) {
+                    DIRTY_UPDATER.compareAndSet(this, 0, 1);
+                }
                 // CAS 成功，原子递增索引
                 NEXT_UPLOAD_INDEX_UPDATER.incrementAndGet(this);
                 continue;
@@ -283,11 +284,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     //从指定位置获取一个int
     public int getInt(long fromOffset) {
-        return mappedMemorySegment.get(JAVA_INT, fromOffset);
+        return mappedMemorySegment.get(JAVA_INT, FileMetaInfo.FILE_META_SIZE + fromOffset);
     }
 
     public long getLong(long fromOffset) {
-        return mappedMemorySegment.get(JAVA_LONG, fromOffset);
+        return mappedMemorySegment.get(JAVA_LONG, FileMetaInfo.FILE_META_SIZE + fromOffset);
     }
 
     //从指定位置获取大小为sie的原始数据
@@ -296,7 +297,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         MemorySegment.copy(
                 mappedMemorySegment,
                 ValueLayout.JAVA_BYTE,
-                fromOffset,
+                FileMetaInfo.FILE_META_SIZE + fromOffset,
                 valueBytes,
                 0,
                 size
@@ -388,7 +389,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataSize);
         //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
         if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
-            manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + fileSize);
+            manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + FileMetaInfo.FILE_META_SIZE + fileSize);
         }
         // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
         //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
@@ -404,7 +405,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     private void doPadding(long startPos, int length) {
-        MemorySegment segment = mappedMemorySegment.asSlice(startPos, length);
+        MemorySegment segment = mappedMemorySegment.asSlice(FileMetaInfo.FILE_META_SIZE + startPos, length);
         segment.set(JAVA_INT, 0, PaddingStruct.PADDING_MAGIC);
         // 性能开销几乎为 0，同时完美解决了文件自解析和读取器阻塞的问题
     }
@@ -460,6 +461,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             if (isCleanup()) {
                 return;
             }
+            this.setClean();
             if (arena != null) {
                 arena.close();
                 arena = null;
@@ -471,7 +473,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             mappedMemorySegment = null;
             file = null;
             blockStateArray = null;
-            this.setClean();
         } catch (Exception e) {
             log.warn("{} file clean failed", this.fileFromOffset, e);
         }
@@ -514,7 +515,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     public MemorySegment getBlockMappedMemorySegmentSlice(int blockIndex) {
-        long fromOffset = (long) blockIndex * blockSize;
+        long fromOffset = FileMetaInfo.FILE_META_SIZE + (long) blockIndex * blockSize;
         return mappedMemorySegment.asSlice(fromOffset, blockSize);
     }
 
