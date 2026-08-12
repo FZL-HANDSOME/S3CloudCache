@@ -85,7 +85,7 @@ public class CacheBlockManager {
         }
         if (isCreateThread) {
             this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
-//            this.getBlockUpLoadQueueTaskThread.start();
+            this.getBlockUpLoadQueueTaskThread.start();
         }
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
                 cacheSize, cacheBlockSize, blockCount, blockUpLoadCount);

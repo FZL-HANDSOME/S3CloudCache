@@ -93,7 +93,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
                              final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory,
-                             boolean isCreateFile, MappedFileManager manager) {
+                              MappedFileManager manager) {
         this.posActive = true;
         this.fileName = fileName;
         this.fileSize = fileSize;
@@ -106,7 +106,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
         this.endBlockIndex = totalBlockCount;
         blockStateArray = new short[totalBlockCount];
-        init(isWarm, isLockMemory, isCreateFile);
+        init(isWarm, isLockMemory);
     }
 
     /**
@@ -125,25 +125,16 @@ public class DefaultMappedFile extends AbstractMappedFile {
             throw new WalException("fileSize must be greater than 0");
         }
         // 创建目录
-        File dir = new File(dirPath);
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new WalException("Failed to create directory: " + dir);
-        }
-        // 创建文件对象
-        File newfile = new File(dir, fileName);
-        if (newfile.exists()) {
-            //如果文件存在的话就不创建了
-            return null;
-        }
+        File file = new File(dirPath,fileName);
         //文件不存在则创建
-        return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, newfile, blockSize, isWarm, isLockMemory, true, manager);
+        return new DefaultMappedFile(dirPath, fileName, fileFromOffset, fileSize, file, blockSize, isWarm, isLockMemory, manager);
     }
 
 
     /**
      * 文件的内存分配以及预热、锁定等
      */
-    public void init(boolean isWarm, boolean isLockMemory, boolean isCreateFile) {
+    public void init(boolean isWarm, boolean isLockMemory) {
         try {
             arena = Arena.ofShared(); // 创建 MemorySegment 的生命周期控制对象
             // 1. 在打开句柄前，检测磁盘文件的真实存在性

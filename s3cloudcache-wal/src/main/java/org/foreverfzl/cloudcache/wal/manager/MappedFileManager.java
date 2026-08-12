@@ -32,8 +32,6 @@ public class MappedFileManager {
     private static final Logger log = LoggerFactory.getLogger(LogName.MAPPED_FILE_MANAGER);
     public final String instanceName;
     public final String bucketName;
-    //从这个位点开始创建文件
-    private final long fromOffset;
 
     // 3. 【核心骨架】：并发跳表。Key 是文件的起始 Offset，天生按位点升序排列
     private final ConcurrentSkipListMap<Long, DefaultMappedFile> mappedFiles = new ConcurrentSkipListMap<>();
@@ -80,7 +78,6 @@ public class MappedFileManager {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
         this.dirPath = dirPath;
-        this.fromOffset = fromOffset;
         this.config = config;
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
@@ -92,12 +89,12 @@ public class MappedFileManager {
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
         this.fileMetaFlushThread = new Thread(this::flushFileMeta);
         this.flushFileReadPositionThread = new Thread(this::flushReadPositionTask);
-        init();
+        init(fromOffset);
     }
 
 
     //启动线程，创建初始文件等
-    private void init() {
+    private void init(long fromOffset) {
         chackMappedFileThread.start();
         fileMetaFlushThread.start();
         flushFileReadPositionThread.start();
@@ -158,21 +155,20 @@ public class MappedFileManager {
     //自定义创建文件
     public DefaultMappedFile synCreateMappedFile(long fileFromOffset, long walFileSize, int blockSize, boolean isWarm, boolean isLock) {
         String fileName = String.valueOf(fileFromOffset);
+        DefaultMappedFile defaultMappedFile = mappedFiles.get(fileFromOffset);
+        if (defaultMappedFile != null) {
+            return defaultMappedFile;
+        }
         //这里水位线线程 和 其它线程可能出现冲突，同时创建文件，需要加锁
         synchronized (fileName.intern()) {
             try {
                 //先去看看新文件是否已经创建好了
-                DefaultMappedFile defaultMappedFile = mappedFiles.get(fileFromOffset);
+                defaultMappedFile = mappedFiles.get(fileFromOffset);
                 if (defaultMappedFile != null) {
                     return defaultMappedFile;
                 }
-                DefaultMappedFile newFile = null;
-                newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, walFileSize,
+                DefaultMappedFile newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, walFileSize,
                         blockSize, isWarm, isLock, this);
-                //文件为null有可能其它线程已经创建了文件了
-                if (newFile == null) {
-                    return null;
-                }
                 mappedFiles.put(fileFromOffset, newFile);
                 return newFile;
             } catch (Exception e) {
@@ -354,7 +350,7 @@ public class MappedFileManager {
         if (bucketMetaFileArena != null) {
             try {
                 bucketMetaFileArena.close(); // 触发底层的 unmap，立即释放物理内存映射
-                bucketMetaFileArena=null;
+                bucketMetaFileArena = null;
                 bucketMetaFileSegment = null;
             } catch (Exception e) {
                 log.error("Failed to close bucketMetaFileArena for bucket: {}", bucketName, e);

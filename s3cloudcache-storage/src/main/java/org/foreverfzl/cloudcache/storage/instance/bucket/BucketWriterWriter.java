@@ -59,7 +59,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     }
 
     private void init() {
-//        getBlockBrokenTaskThread.start();
+        getBlockBrokenTaskThread.start();
     }
 
 
