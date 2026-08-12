@@ -95,7 +95,7 @@ public class MappedFileManager {
 
     //启动线程，创建初始文件等
     private void init(long fromOffset) {
-        chackMappedFileThread.start();
+//        chackMappedFileThread.start();
         fileMetaFlushThread.start();
         flushFileReadPositionThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
@@ -190,7 +190,6 @@ public class MappedFileManager {
                 break;
             }
         }
-        flushReadPositionTaskExtracted();
     }
 
     private void flushReadPositionTaskExtracted() {
@@ -219,8 +218,6 @@ public class MappedFileManager {
                 break;
             }
         }
-        //被打断退出循环后再执行最后一次
-        chackMappedFileTaskExtracted();
     }
 
     private void chackMappedFileTaskExtracted() {
@@ -233,6 +230,7 @@ public class MappedFileManager {
                         file.clean();
                         //删除文件
                         file.delete();
+                        log.info("{} file deleted successfully", file.getFileName());
                     }
                 }
             }
@@ -252,7 +250,6 @@ public class MappedFileManager {
                 break;
             }
         }
-        flushFileMetaExtracted();
     }
 
     private void flushFileMetaExtracted() {
@@ -293,17 +290,20 @@ public class MappedFileManager {
         }));
     }
 
-    //打断线程，让线程执行最后一次
+    //让线程执行最后一次
     public void endFlushFileReadPosition() {
         flushFileReadPositionThread.interrupt();
+        flushReadPositionTaskExtracted();
     }
 
     public void endMetaFlush() {
         fileMetaFlushThread.interrupt();
+        flushFileMetaExtracted();
     }
 
     public void endChackMappedFile() {
         chackMappedFileThread.interrupt();
+        chackMappedFileTaskExtracted();
     }
 
 

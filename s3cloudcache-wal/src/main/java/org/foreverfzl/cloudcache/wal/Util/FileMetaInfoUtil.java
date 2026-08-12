@@ -31,6 +31,7 @@ public class FileMetaInfoUtil {
             metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
             pos += Long.BYTES;
             metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
+            log.info("flushFileMetaInfo successfully, readPosL:{},uploadPos:{},updateTime:{}", readPos, uploadPos, updateTime);
             // Ensure durability.
             metaSegment.force();
             if (mappedFile.fileFromOffset == readPos && mappedFile.upLoadPosition == uploadPos) {

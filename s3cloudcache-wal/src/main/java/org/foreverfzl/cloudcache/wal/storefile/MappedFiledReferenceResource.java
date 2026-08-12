@@ -28,13 +28,9 @@ public abstract class MappedFiledReferenceResource {
         return refCount.decrementAndGet();
     }
 
-
     //获取该文件的引用
     public int hold() {
-        if (!available) {
-            return refCount.incrementAndGet();
-        }
-        return -1;
+        return refCount.incrementAndGet();
     }
 
     public void setClean() {

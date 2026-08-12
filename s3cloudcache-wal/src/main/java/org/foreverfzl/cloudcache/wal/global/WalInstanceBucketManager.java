@@ -48,7 +48,8 @@ public class WalInstanceBucketManager {
         for (int i = 0; i < LOCKS_COUNT; i++) {
             locks[i] = new ReentrantLock();
         }
-//        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 15, TimeUnit.SECONDS);
+        //todo 记得改回15秒
+        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 5, TimeUnit.SECONDS);
     }
 
     private void checkBlockMeta() {
@@ -63,13 +64,22 @@ public class WalInstanceBucketManager {
             for (MappedFileManager fileManager : values) {
                 //获取到当前Bucket的活跃文件
                 DefaultMappedFile activeFile = fileManager.getActiveMappedFile().get();
+                if(activeFile == null){
+                    continue;
+                }
+                MappedFileManager manager = activeFile.getManager();
                 //获取最后活跃的文件各个属性
                 int blockSize = fileManager.config.blockSize;
                 long wrotePosition = activeFile.wrotePosition;
                 int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(wrotePosition, blockSize));
                 //获取该fileManager对应的元数据管理者
                 BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
+                if (!blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime)) {
+                    continue;
+                }
+                //如果满足条件并且封口成功了
+
+
             }
         } catch (Exception e) {
             log.warn("checkBlockMeta Task Failed", e);

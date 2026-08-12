@@ -32,8 +32,8 @@ public class AppendMessageResult {
     private final long storeTimestamp;
 
 
-    public AppendMessageResult(DefaultMappedFile defaultMappedFile,AppendStatus status, long storeTimestamp, long fileFromOffset) {
-        this.defaultMappedFile=defaultMappedFile;
+    public AppendMessageResult(DefaultMappedFile defaultMappedFile, AppendStatus status, long storeTimestamp, long fileFromOffset) {
+        this.defaultMappedFile = defaultMappedFile;
         this.status = status;
         this.storeTimestamp = storeTimestamp;
         this.fileFromOffset = fileFromOffset;
@@ -44,8 +44,8 @@ public class AppendMessageResult {
     /**
      * 创建一个表示失败的结果（不携带偏移和字节数信息）
      */
-    public static AppendMessageResult fail(DefaultMappedFile defaultMappedFile,AppendStatus status, long fileFromOffset) {
-        return new AppendMessageResult(defaultMappedFile,status, System.currentTimeMillis(), fileFromOffset);
+    public static AppendMessageResult fail(DefaultMappedFile defaultMappedFile, AppendStatus status, long fileFromOffset) {
+        return new AppendMessageResult(defaultMappedFile, status, System.currentTimeMillis(), fileFromOffset);
     }
 
 
@@ -61,6 +61,7 @@ public class AppendMessageResult {
          * 文件剩余空间不足，已写满
          */
         END_OF_FILE,
+        BLOCK_SEALED,
         /**
          * 参数异常（如 walDataStruct 为空）
          */

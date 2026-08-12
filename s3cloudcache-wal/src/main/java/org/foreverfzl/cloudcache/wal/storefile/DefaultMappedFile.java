@@ -200,6 +200,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //刷盘成功更新指针
             READ_POSITION_UPDATER.set(this, expectedNewPosition);
             NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
+            log.info("ackReadPosition successfully,newReadpos is{}", expectedNewPosition);
         }
     }
 
@@ -275,6 +276,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 mappedMemorySegment.force();
             }
         }
+        log.info("file {} warm pages successfully", this.fileFromOffset);
         //todo 还不知道是否真正能锁定内存
         //根据用户选择是否锁定内存
         if (isLockMemory) {
@@ -334,7 +336,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
         int logicalIndex;
         //获取该文件的引用
-        this.getRefCount();
         while (true) {
             currentPos = WROTE_POSITION_UPDATER.get(this);
             newPos = currentPos + msgSize;
@@ -398,6 +399,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             result.setLogicalIndex(logicalIndex);
             //写入成功，增加写入到PageCache字节数
             if (manager.blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize)) {
+                //如果返回true则代表该blick中的数据全部写入到pageCache中，则可以将数组对应位置设置为1，可以手动刷盘更新read指针
                 SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 1);
             }
         }
@@ -445,9 +447,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //然后更新endBlockIndex
             endBlockIndex = Math.min(endBlockIndex, loginBlockIndex);
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
-        } finally {
-            //释放引用
-            this.release();
         }
     }
 
@@ -528,6 +527,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         return NEXT_UPLOAD_INDEX_UPDATER.get(this) != totalBlockCount;
     }
 
+    public MappedFileManager getManager() {
+        return manager;
+    }
 }
 
 

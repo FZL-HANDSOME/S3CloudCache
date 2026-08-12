@@ -19,7 +19,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
 
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
     private volatile long writePosition; //写指针
-    //如果WAL文件中有一个数据写入失败，则该物理Block应该标记为clean
+
+    //如果isClean为true那么最后一个线程会清除block并将block放回到空闲block池中
     private volatile boolean isClean = false;
 
     //globalMemorySegment的一个切片

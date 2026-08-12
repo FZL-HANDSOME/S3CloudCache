@@ -16,8 +16,8 @@ public class BlockMetaDataManager {
 
     //key为fileFromOffset+blockIndex
     private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
-    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
-    private final BlockUpLoadQueue blockUpLoadQueue = new BlockUpLoadQueue();
+    //    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
+//    private final BlockUpLoadQueue blockUpLoadQueue = new BlockUpLoadQueue();
     //存放物理block写入失败，读取wal文件重新恢复的信息
     private final BlockRecoverQueue blockRecoverQueue = new BlockRecoverQueue();
     //存放物理block上传不上去的数据
@@ -27,33 +27,35 @@ public class BlockMetaDataManager {
 
     }
 
-    public void chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
+    //该方法返回true则代表成功的将最后一个长时间不写block封口
+    public boolean chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
         BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
         if (blockMetaData == null) {
-            return;
+            return false;
         }
         if (blockMetaData.getState() != BlockMetaData.OPEN) {
             //如果不是开放状态则不检查
-            return;
+            return false;
         }
         //计算差值
         long delta = curTime - blockMetaData.getLastActiveTime();
         if (delta <= maxFreeTime) {
             //不满足时间差
-            return;
+            return false;
         }
-        //封口然后放入到上传队列中
+        //满足时间差封口
         blockMetaData.trySeal();
-        blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
+        return true;
+//        blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
     }
 
     public DeadDataInfo getDeadDataInfo() throws InterruptedException {
         return deadDataQueue.take();
     }
 
-    public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
-        return blockUpLoadQueue.take();
-    }
+//    public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
+//        return blockUpLoadQueue.take();
+//    }
 
     public RecoverTask getTaskFromRecoverQueue() throws InterruptedException {
         return blockRecoverQueue.take();
@@ -97,7 +99,7 @@ public class BlockMetaDataManager {
         }
         blockMetaData.addPageCacheBytes(bytes);
         blockMetaData.updateLastTime();
-        //如果该block封口了并且全部数据写入到PageCache中
+        //如果该block写入数据没有错误，并且封口了，并且全部数据写入到PageCache中 返回true
         if (blockMetaData.getState() == BlockMetaData.SEALED
                 && blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
             return true;
@@ -111,7 +113,7 @@ public class BlockMetaDataManager {
     public void addExpectedBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
-            return;
+            return ;
         }
         blockMetaData.addExpectedBytes(bytes);
     }
@@ -136,7 +138,7 @@ public class BlockMetaDataManager {
             return;
         }
         boolean trySeal = false;
-        synchronized (this) {
+        synchronized (blockMetaData) {
             if (blockMetaData.getState() == BlockMetaData.SEALED) {
                 return;
             }
@@ -155,7 +157,7 @@ public class BlockMetaDataManager {
         if (blockMetaData == null) {
             return;
         }
-        synchronized (this) {
+        synchronized (blockMetaData) {
             if (blockMetaData.isBroken()) {
                 return;
             }
@@ -205,7 +207,7 @@ public class BlockMetaDataManager {
         return metaData != null && metaData.getState() == 1;
     }
 
-    public boolean isSealed(Long key){
+    public boolean isSealed(Long key) {
         BlockMetaData metaData = metaDataMap.get(key);
         return metaData != null && metaData.getState() == 1;
     }
@@ -218,7 +220,8 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1 && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
+        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
+                && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
     }
 
     //将所有open的block封口

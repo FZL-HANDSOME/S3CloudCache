@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -48,50 +49,59 @@ public class CacheBlockUpdater {
      * 采用虚拟线程将Block上传到S3服务器，并且限制并发数量
      */
     public void upLoadBlock(CloudCacheBlock block) {
-        // 扔给执行器托管，解决优雅停机和追踪问题
-        s3VirtualExecutor.submit(() -> {
-            try {
-                // 3. 必须先抢到网络准入令牌，抢不到的虚拟线程会被 JVM 自动、高效地卸载挂起
-                upLoadLimiter.acquire();
-                block.getReference();
-                manager.upCount.incrementAndGet();
-                //先将元数据改为上传中
-                long fileFromOffset = block.getFileFromOffset();
-                int logicalIndex = block.getLogicalIndex();
-                manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex);
-                // 执行重度网络 I/O
-                //只重试三次
-                boolean isSuccess = false;
-                for (int i = 0; i < 3; i++) {
-                    isSuccess = executeUpload(block);
-                    if (isSuccess) {
-                        //将元数据设置为上传成功
-                        manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
-                        //然后ack确认上传指针
-                        DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
-                        defaultMappedFile.ackUpLoadPosition(logicalIndex);
-                        //将block设置为清除
-                        block.setClean();
-                        break;
-                    }
+        if (block == null) {
+            throw new IllegalArgumentException("block cannot be null");
+        }
+        // 在任务提交前就登记并持有 Block，避免关闭流程在任务尚未调度时误判上传已完成。
+        block.getReference();
+        manager.upCount.incrementAndGet();
+        try {
+            s3VirtualExecutor.submit(() -> executeUploadTask(block));
+        } catch (RejectedExecutionException e) {
+            manager.upCount.decrementAndGet();
+            block.releaseReference();
+            throw e;
+        }
+    }
+
+    private void executeUploadTask(CloudCacheBlock block) {
+        boolean permitAcquired = false;
+        try {
+            upLoadLimiter.acquire();
+            permitAcquired = true;
+            long fileFromOffset = block.getFileFromOffset();
+            int logicalIndex = block.getLogicalIndex();
+            manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex);
+            boolean isSuccess = false;
+            for (int i = 0; i < 3; i++) {
+                isSuccess = executeUpload(block);
+                if (isSuccess) {
+                    manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
+                    block.getDefaultMappedFile().ackUpLoadPosition(logicalIndex);
+                    //将block标记为清除回收
+                    block.setClean();
+                    break;
                 }
-                //三次重试还不成功，抛出异常
-                if (!isSuccess) {
-                    throw new CoreException("Failed to upload block");
-                }
-            }catch (InterruptedException e){
-                Thread.currentThread().interrupt();
-            } catch (Exception t) {
-                log.warn("Exception is={},instance={},bucket={},block=>{}", t, manager.instanceName, manager.bucketName, block);
-                handleUploadFailure(block);
-            } finally {
-                // 4. 无论成功失败，释放令牌，让下一个块上云
-                manager.upCount.incrementAndGet();
-                block.releaseReference();
+            }
+            if (!isSuccess) {
+                throw new CoreException("Failed to upload block");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            handleUploadFailure(block);
+        } catch (Exception e) {
+            log.warn("S3 upload failed, instance={}, bucket={}, block={}",
+                    manager.instanceName, manager.bucketName, block, e);
+            handleUploadFailure(block);
+        } finally {
+            if (permitAcquired) {
                 upLoadLimiter.release();
             }
-        });
+            manager.upCount.decrementAndGet();
+            block.releaseReference();
+        }
     }
+
 
     /**
      * 真正执行上传的方法，使用S3client进行上传
@@ -131,6 +141,7 @@ public class CacheBlockUpdater {
         CacheBlockManager cacheBlockManager = block.getManager();
         DeadDataInfo deadDataInfo = new DeadDataInfo(cacheBlockManager.instanceName, cacheBlockManager.bucketName,
                 block.getFileFromOffset(), block.getLogicalIndex(), block.getS3Key());
+        //将block标记为清除回收
         block.setClean();
         manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex(), deadDataInfo);
     }

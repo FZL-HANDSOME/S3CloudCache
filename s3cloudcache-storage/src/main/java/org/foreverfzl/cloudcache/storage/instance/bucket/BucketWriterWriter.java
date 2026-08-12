@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
+import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
@@ -79,6 +80,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 String s3Key = cacheBlockManager.deleteBlock(fileFromOffset, logicalIndex);
                 //将对应的元数据删除
                 blockMetaDataManager.deleteMetaData(fileFromOffset, logicalIndex);
+                //将对应的物理block清除回收
+                CloudCacheBlock block = cacheBlockManager.getExistingBlock(fileFromOffset, logicalIndex);
+
                 return new WriteResult(s3Key, -1, -1, false);
             }
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
