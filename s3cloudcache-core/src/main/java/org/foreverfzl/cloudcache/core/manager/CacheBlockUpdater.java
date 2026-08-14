@@ -52,6 +52,17 @@ public class CacheBlockUpdater {
         if (block == null) {
             throw new IllegalArgumentException("block cannot be null");
         }
+        long fileFromOffset = block.getFileFromOffset();
+        int logicalIndex = block.getLogicalIndex();
+        if(!manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex)){
+            //如果CAS标记为上传中 失败，说明其它线程进行上传了
+            return;
+        }
+        //既然能走这里，说明数据一定都在pageCache中，这里为什么添加一个 FinishedPageCache？
+        //因为可能出现这样的情况：当一个block都写完了，然后没有下一个线程去封口，那么此时文件类中的addPageCacheBytes就不会将对应位置设置为1
+        //这里添加FinishedPageCache就是为了保证能够将对应位置block状态设置为1(全部数据写入到pageCache)
+        DefaultMappedFile defaultMappedFile = block.getDefaultMappedFile();
+        defaultMappedFile.setBlockStateArrayFinishedPageCache(logicalIndex);
         // 在任务提交前就登记并持有 Block，避免关闭流程在任务尚未调度时误判上传已完成。
         block.getReference();
         manager.upCount.incrementAndGet();
@@ -71,7 +82,6 @@ public class CacheBlockUpdater {
             permitAcquired = true;
             long fileFromOffset = block.getFileFromOffset();
             int logicalIndex = block.getLogicalIndex();
-            manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex);
             boolean isSuccess = false;
             for (int i = 0; i < 3; i++) {
                 isSuccess = executeUpload(block);

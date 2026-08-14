@@ -17,7 +17,7 @@ public class BlockMetaDataManager {
     //key为fileFromOffset+blockIndex
     private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
     //    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
-//    private final BlockUpLoadQueue blockUpLoadQueue = new BlockUpLoadQueue();
+    private final BlockUpLoadQueue blockUpLoadQueue = new BlockUpLoadQueue();
     //存放物理block写入失败，读取wal文件重新恢复的信息
     private final BlockRecoverQueue blockRecoverQueue = new BlockRecoverQueue();
     //存放物理block上传不上去的数据
@@ -28,37 +28,39 @@ public class BlockMetaDataManager {
     }
 
     //该方法返回true则代表成功的将最后一个长时间不写block封口
-    public boolean chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
+    public void chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
         BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
         if (blockMetaData == null) {
-            return false;
+            return;
         }
         if (blockMetaData.getState() != BlockMetaData.OPEN) {
             //如果不是开放状态则不检查
-            return false;
+            return;
         }
         //计算差值
         long delta = curTime - blockMetaData.getLastActiveTime();
         if (delta <= maxFreeTime) {
             //不满足时间差
-            return false;
+            return;
         }
-        //满足时间差封口
-        blockMetaData.trySeal();
-        return true;
-//        blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
+        //满足时间差封口，上传
+        trySeal(fileFromOffset, blockIndex);
     }
 
     public DeadDataInfo getDeadDataInfo() throws InterruptedException {
         return deadDataQueue.take();
     }
 
-//    public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
-//        return blockUpLoadQueue.take();
-//    }
+    public UploadTask getTaskFromUpLoadQueue() throws InterruptedException {
+        return blockUpLoadQueue.take();
+    }
 
     public RecoverTask getTaskFromRecoverQueue() throws InterruptedException {
         return blockRecoverQueue.take();
+    }
+
+    public void setTaskToRecoverQueue(RecoverTask recoverTask) {
+        blockRecoverQueue.submit(recoverTask);
     }
 
     public void deleteMetaData(long fileFromOffset, int blockIndex) {
@@ -91,6 +93,7 @@ public class BlockMetaDataManager {
     /**
      * 增加写入到PageCache的字节数，如果封口并且PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
      * 该方法返回true则代表可以将对应文件的对应block设置为1(可以刷新状态)
+     * 这里只保证了正常情况下block的检查，项目close和N秒后不写入自动封口这两种情况不在这个方法考虑范围内
      */
     public boolean addPageCacheBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
@@ -113,7 +116,7 @@ public class BlockMetaDataManager {
     public void addExpectedBytes(long fileFromOffset, int blockIndex, int bytes) {
         BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
-            return ;
+            return;
         }
         blockMetaData.addExpectedBytes(bytes);
     }
@@ -130,7 +133,7 @@ public class BlockMetaDataManager {
     }
 
     /**
-     * CAS封口
+     * CAS封口，并检查block的状态，从而进行不同的操作
      */
     public void trySeal(long fileFromOffset, int blockIndex) {
         BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
@@ -144,6 +147,11 @@ public class BlockMetaDataManager {
             }
             //seal和broken状态存在竞争关系
             trySeal = blockMetaData.trySeal();
+        }
+        //检查一下block是否可以上传，并且成功将block从封口状态修改为上传中
+        if (canUpload(fileFromOffset, blockIndex) && tryStartUpload(fileFromOffset, blockIndex)) {
+            blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
+            return;
         }
         //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
         if (trySeal && blockMetaData.isBroken()) {
@@ -172,8 +180,12 @@ public class BlockMetaDataManager {
     /**
      * CAS改为上传中
      */
-    public void tryStartUpload(long fileFromOffset, int blockIndex) {
-        get(fileFromOffset, blockIndex).tryStartUpload();
+    public boolean tryStartUpload(long fileFromOffset, int blockIndex) {
+        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return false;
+        }
+        return blockMetaData.tryStartUpload();
     }
 
 
@@ -204,7 +216,9 @@ public class BlockMetaDataManager {
      */
     public boolean isSealed(long fileFromOffset, int blockIndex) {
         BlockMetaData metaData = get(fileFromOffset, blockIndex);
-        return metaData != null && metaData.getState() == 1;
+        if (metaData == null) return false;
+        int state = metaData.getState();
+        return state != 0;
     }
 
     public boolean isSealed(Long key) {
@@ -220,7 +234,7 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
+        return metaData.getState() == 1 && !metaData.isBroken() && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
                 && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
     }
 

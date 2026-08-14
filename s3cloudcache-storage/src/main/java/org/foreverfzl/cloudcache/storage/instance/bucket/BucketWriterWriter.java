@@ -4,6 +4,7 @@ import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
@@ -80,9 +81,6 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 String s3Key = cacheBlockManager.deleteBlock(fileFromOffset, logicalIndex);
                 //将对应的元数据删除
                 blockMetaDataManager.deleteMetaData(fileFromOffset, logicalIndex);
-                //将对应的物理block清除回收
-                CloudCacheBlock block = cacheBlockManager.getExistingBlock(fileFromOffset, logicalIndex);
-
                 return new WriteResult(s3Key, -1, -1, false);
             }
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
@@ -142,7 +140,21 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
                 long fileFromOffset = task.getFileFromOffset();
                 int blockIndex = task.getBlockIndex();
+                //先看看对应的block是否真正全部写入到PageCache或者落盘
+                BlockMetaData blockMetaData = blockMetaDataManager.get(fileFromOffset, blockIndex);
+                if (blockMetaData == null) {
+                    continue;
+                }
+                if (blockMetaData.getState() != 1 && blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
+                    //重新放回
+                    blockMetaDataManager.setTaskToRecoverQueue(task);
+                    Thread.sleep(100);
+                    continue;
+                }
                 DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
+                if (mappedFile == null) {
+                    continue;
+                }
                 int blockSize = mappedFile.getBlockSize();
                 long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);
                 long pos = fileFromOffset + ((long) blockIndex * blockSize);
@@ -168,7 +180,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                     crc.reset();
                 }
             } catch (InterruptedException interruptedException) {
-                active=false;
+                active = false;
                 Thread.currentThread().interrupt();
                 break;
             } catch (Exception e) {
@@ -195,7 +207,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
 
     public void close() {
-        this.state=WriterState.CLOSING;
+        this.state = WriterState.CLOSING;
         getBlockBrokenTaskThread.interrupt();
     }
 

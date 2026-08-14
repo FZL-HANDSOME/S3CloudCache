@@ -59,8 +59,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     protected int totalBlockCount; //该文件逻辑上对应多少个Block
     protected int blockSize;
-    //指针更新截至block位置，默认为totalBlockCount，如果期间出现block写入失败，则默认是第一个失败block的位置
-    protected int endBlockIndex;
 
     //blockStateArray[] 为0代表该block既没写也没上传，1代表该block数据全部写入到PageCache中，3代表该block已经上传到服务器
     protected short[] blockStateArray;
@@ -105,7 +103,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
         this.manager = manager;
         this.metaDirty = 0;
         this.totalBlockCount = (int) Math.ceil((double) fileSize / blockSize);
-        this.endBlockIndex = totalBlockCount;
         blockStateArray = new short[totalBlockCount];
         init(isWarm, isLockMemory);
     }
@@ -178,13 +175,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         while (true) {
             if (!posActive) return;
             int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
-            //如果到了截至位置则直接退出不更新
-            if (curReadBlockIndex == endBlockIndex) {
-                break;
-            }
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, curReadBlockIndex);
-            //看看状态是不是1，也就是数据全部落入到PageCache中
-            if (state == 0 || state == 3) {
+            //如果状态为1或者3，则代表数据全部落入到PageCache中
+            if (state == 0) {
                 break;
             }
             long curReadPosition = READ_POSITION_UPDATER.get(this);
@@ -211,16 +204,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     public void ackUpLoadPosition(int logicalIndex) {
         // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
-        SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 3);
+        setBlockStateArrayFinishedUpLoad(logicalIndex);
         //每个线程都去看一下是否能进行更新
         while (true) {
             if (!posActive) return;
             // 在循环外固定当前要检查的索引
             int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
-            //如果到了截至位置则直接退出不更新
-            if (currentIndex == endBlockIndex) {
-                break;
-            }
             // 检查当前索引位置是否已填坑
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, currentIndex);
             if (state == 0 || state == 1) {
@@ -400,7 +389,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //写入成功，增加写入到PageCache字节数
             if (manager.blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize)) {
                 //如果返回true则代表该blick中的数据全部写入到pageCache中，则可以将数组对应位置设置为1，可以手动刷盘更新read指针
-                SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, logicalIndex, (short) 1);
+                setBlockStateArrayFinishedPageCache(logicalIndex);
             }
         }
         return result;
@@ -443,9 +432,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     writeOffset, size, fileName, e);
             //出现异常关闭文件
             this.close();
-            int loginBlockIndex = Math.toIntExact(ProjectUtil.divideByPower(writeOffset, blockSize));
-            //然后更新endBlockIndex
-            endBlockIndex = Math.min(endBlockIndex, loginBlockIndex);
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);
         }
     }
@@ -492,6 +478,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
             log.warn("{} file delete failed", path, e);
         }
 
+    }
+
+    public void setBlockStateArrayFinishedPageCache(int blockIndex) {
+        SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, blockIndex, (short) 1);
+    }
+
+    public void setBlockStateArrayFinishedUpLoad(int blockIndex) {
+        SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, blockIndex, (short) 3);
     }
 
     //是否清除资源，true代表可以

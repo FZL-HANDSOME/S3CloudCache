@@ -56,9 +56,9 @@ public class CacheBlockManager {
     //正在上传的数量
     protected AtomicInteger upCount = new AtomicInteger(0);
 
-//    //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
-//    private volatile boolean active = true;
-//    private Thread getBlockUpLoadQueueTaskThread;
+    //该线程专门获取BlockUpLoadQueueManager类中BlockUpLoadQueue中的任务
+    private volatile boolean active = true;
+    private Thread getBlockUpLoadQueueTaskThread;
 
     public CacheBlockManager(String instanceName, String bucketName, BlockMetaDataManager blockMetaDataManager,
                              S3Client s3Client, BucketConfig config, long cacheSize, int cacheBlockSize,
@@ -83,34 +83,33 @@ public class CacheBlockManager {
         for (int i = 0; i < blockLocks.length; i++) {
             blockLocks[i] = new Object();
         }
-//        if (isCreateThread) {
-//            this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
-//            this.getBlockUpLoadQueueTaskThread.start();
-//        }
+        if (isCreateThread) {
+            this.getBlockUpLoadQueueTaskThread = new Thread(this::getBlockUpLoadQueue);
+            this.getBlockUpLoadQueueTaskThread.start();
+        }
         log.info("Initialized CacheBlockManager with cacheSize={}, blockSize={}, blockCount={},blockUpLoadMaxCount={}",
                 cacheSize, cacheBlockSize, blockCount, blockUpLoadCount);
     }
 
 
-//    private void getBlockUpLoadQueue() {
-//        while (active) {
-//            try {
-//                UploadTask task = blockMetaDataManager.getTaskFromUpLoadQueue();
-//                CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(task.getFileFromOffset(), task.getLogicalIndex()));
-//                if (cacheBlock == null) {
-//                    return;
-//                }
-//                //上传
-//                if (cacheBlock.getCurReferenceCount() == 0) {
-//                    blockUpdater.upLoadBlock(cacheBlock);
-//                }
-//            } catch (InterruptedException e) {
-//                active = false;
-//                Thread.currentThread().interrupt();
-//                break;
-//            }
-//        }
-//    }
+    private void getBlockUpLoadQueue() {
+        while (active) {
+            try {
+                UploadTask task = blockMetaDataManager.getTaskFromUpLoadQueue();
+                CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(task.getFileFromOffset(), task.getLogicalIndex()));
+                if (cacheBlock == null) {
+                    return;
+                }
+                //上传
+                blockUpdater.upLoadBlock(cacheBlock);
+            } catch (InterruptedException e) {
+                log.error("CacheBlockManager getBlockUpLoadQueue InterruptedException", e);
+                active = false;
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+    }
 
     public AppendDataResult appendData(BlockDataStruct dataStruct) {
         return this.appendData(dataStruct, config.s3KeyPrefix);
@@ -292,7 +291,7 @@ public class CacheBlockManager {
 
     //todo
     public void close() {
-//        getBlockUpLoadQueueTaskThread.interrupt();
+        getBlockUpLoadQueueTaskThread.interrupt();
         blockUpdater.close();
         //关闭资源
         if (arena != null) {

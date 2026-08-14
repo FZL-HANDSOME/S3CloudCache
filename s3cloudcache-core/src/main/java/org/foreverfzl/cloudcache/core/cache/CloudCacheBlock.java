@@ -160,6 +160,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     }
 
     public void clean() {
+        this.setActive();
         this.s3Key = null;
         this.writePosition = 0;
         this.defaultMappedFile = null;

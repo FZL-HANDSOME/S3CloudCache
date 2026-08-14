@@ -64,22 +64,16 @@ public class WalInstanceBucketManager {
             for (MappedFileManager fileManager : values) {
                 //获取到当前Bucket的活跃文件
                 DefaultMappedFile activeFile = fileManager.getActiveMappedFile().get();
-                if(activeFile == null){
+                if (activeFile == null) {
                     continue;
                 }
-                MappedFileManager manager = activeFile.getManager();
                 //获取最后活跃的文件各个属性
                 int blockSize = fileManager.config.blockSize;
                 long wrotePosition = activeFile.wrotePosition;
                 int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(wrotePosition, blockSize));
                 //获取该fileManager对应的元数据管理者
                 BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                if (!blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime)) {
-                    continue;
-                }
-                //如果满足条件并且封口成功了
-
-
+                blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
             }
         } catch (Exception e) {
             log.warn("checkBlockMeta Task Failed", e);

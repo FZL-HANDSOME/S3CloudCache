@@ -334,7 +334,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     cacheBlockManager.updateAllBlock(upLoadDeadline);
                     //5：刷新读指针
                     mappedFileManager.endFlushFileReadPosition();
-                    //此时要真正的关闭文件、block，并且不允许指针进行改动，这样保证了6 7步骤的指针状态是一致的
+                    //此时要真正的关闭文件、block，并且不允许文件指针进行改动，这样保证了6 7步骤的指针状态是一致的
                     mappedFileManager.closeAllFile();
                     cacheBlockManager.closeAllBlock();
                     // 6：强制刷新所有文件的元数据区域
