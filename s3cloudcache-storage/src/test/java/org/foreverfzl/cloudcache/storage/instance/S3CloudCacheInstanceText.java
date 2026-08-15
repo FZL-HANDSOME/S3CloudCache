@@ -54,17 +54,17 @@ public class S3CloudCacheInstanceText {
                 System.out.println(write.getSize());
             }
         }
-        MappedFileManager mappedManager = textBucket.getMappedManager();
-        DefaultMappedFile activeMappedFile = mappedManager.getActiveMappedFile().get();
-        long pos = 0;
-        int magic = activeMappedFile.getInt(pos);
-        pos += 4;
-        int chackSum = activeMappedFile.getInt(pos);
-        pos += 4;
-        int valueLen = activeMappedFile.getInt(pos);
-        pos += 4;
-        byte[] orgData = activeMappedFile.getOrgData(pos, valueLen);
-        String data = new String(orgData, StandardCharsets.UTF_8);
+//        MappedFileManager mappedManager = textBucket.getMappedManager();
+//        DefaultMappedFile activeMappedFile = mappedManager.getActiveMappedFile().get();
+//        long pos = 0;
+//        int magic = activeMappedFile.getInt(pos);
+//        pos += 4;
+//        int chackSum = activeMappedFile.getInt(pos);
+//        pos += 4;
+//        int valueLen = activeMappedFile.getInt(pos);
+//        pos += 4;
+//        byte[] orgData = activeMappedFile.getOrgData(pos, valueLen);
+//        String data = new String(orgData, StandardCharsets.UTF_8);
         textInstance.close(10000, 10000);
     }
 

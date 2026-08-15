@@ -317,7 +317,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         // 1. 利用 try-with-resources 自动管理虚拟线程池的生命周期
         try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (BucketWriterWriter writer : writers) {
-//                closeExecutor.execute(() -> {
+                closeExecutor.execute(() -> {
                 try {
                     // 1：先将所有的 bucket 设置为关闭中，不可写入
                     writer.close();
@@ -349,7 +349,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 } catch (Throwable t) {
                     log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
                 }
-//                });
+                });
             }
         } //执行到这里时，Java 自动调用 closeExecutor.close()，主线程在此强行阻塞，直到所有虚拟线程全部执行完成
 
