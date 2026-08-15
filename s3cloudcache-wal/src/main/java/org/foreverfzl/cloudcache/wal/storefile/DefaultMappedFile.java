@@ -193,7 +193,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //刷盘成功更新指针
             READ_POSITION_UPDATER.set(this, expectedNewPosition);
             NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
-            log.info("ackReadPosition successfully,newReadpos is{}", expectedNewPosition);
+            log.info("ackReadPosition successfully,newReadpos is {}", expectedNewPosition);
         }
     }
 
@@ -456,7 +456,6 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 fileChannel = null;
             }
             mappedMemorySegment = null;
-            file = null;
             blockStateArray = null;
         } catch (Exception e) {
             log.warn("{} file clean failed", this.fileFromOffset, e);
@@ -472,7 +471,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 path = file.getAbsolutePath();
                 Files.delete(file.toPath());
                 manager.removeMappedFile(this.fileFromOffset);
-                log.info("The file has been deleted.: {}", path);
+                log.info("The file has been deleted: {}", path);
             }
         } catch (Exception e) {
             log.warn("{} file delete failed", path, e);

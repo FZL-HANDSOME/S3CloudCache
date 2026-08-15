@@ -41,8 +41,6 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private final S3CloudCacheInstance instance;
 
-    //该bucket下有多少线程正在写入
-    private final AtomicLong walWriteCount = new AtomicLong(0L);
 
     private final BlockMetaDataManager blockMetaDataManager;
     private volatile boolean active = true;
@@ -69,9 +67,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     public WriteResult write(byte[] data) {
         WriteResult writeResult = null;
         try {
-            walWriteCount.incrementAndGet();
             AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
-            walWriteCount.decrementAndGet();
             long fileFromOffset = result.getFileFromOffset();
             int logicalIndex = result.getLogicalIndex();
             //如果出现其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
@@ -189,26 +185,13 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         }
     }
 
-    //关闭的时候会触发
-    public void waitWriterFinished(long deadline) {
-        //1：等待所有的线程写入完成
-        while (walWriteCount.get() != 0) {
-            try {
-                if (System.currentTimeMillis() >= deadline) {
-                    //超时退出
-                    log.warn("{} close timeout, force shutdown", bucketName);
-                    return;
-                }
-                Thread.sleep(20);
-            } catch (Exception e) {
-            }
-        }
-    }
-
-
     public void close() {
         this.state = WriterState.CLOSING;
         getBlockBrokenTaskThread.interrupt();
+    }
+
+    public MappedFileManager getMappedManager(){
+        return mappedFileManager;
     }
 
 

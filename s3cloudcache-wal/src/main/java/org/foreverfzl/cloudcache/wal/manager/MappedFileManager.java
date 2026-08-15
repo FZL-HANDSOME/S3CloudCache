@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 
@@ -74,6 +75,10 @@ public class MappedFileManager {
     private MemorySegment bucketMetaFileSegment;
 
 
+    //该bucket下有多少线程正在写入
+    private final AtomicLong walWriteCount = new AtomicLong(0L);
+
+
     public MappedFileManager(String dirPath, String instanceName, String bucketName, BucketConfig config, long fromOffset) {
         this.instanceName = instanceName;
         this.bucketName = bucketName;
@@ -106,11 +111,10 @@ public class MappedFileManager {
 
     public AppendMessageResult appendData(final DataStruct dataStruct) {
         AppendMessageResult result = null;
-        DefaultMappedFile oldMappedFile = null;
+        DefaultMappedFile oldMappedFile = activeMappedFile.get();
+        oldMappedFile.hold();
+        walWriteCount.incrementAndGet();
         try {
-            //先保存当前数据的文件
-            oldMappedFile = activeMappedFile.get();
-            oldMappedFile.hold();
             //先去目前活跃的文件中添加数据
             result = oldMappedFile.appendData(dataStruct);
             //如果是文件结尾或者关闭，则创建新的文件进行写
@@ -128,7 +132,8 @@ public class MappedFileManager {
                 }
             }
         } finally {
-            if (oldMappedFile != null) oldMappedFile.release();
+            oldMappedFile.release();
+            walWriteCount.decrementAndGet();
         }
         return result;
     }
@@ -230,7 +235,6 @@ public class MappedFileManager {
                         file.clean();
                         //删除文件
                         file.delete();
-                        log.info("{} file deleted successfully", file.getFileName());
                     }
                 }
             }
@@ -375,8 +379,24 @@ public class MappedFileManager {
         }
     }
 
-    public boolean hasMappedFile() {
-        return !mappedFiles.isEmpty();
+    //关闭的时候会触发
+    public void waitWriterFinished(long deadline) {
+        //1：等待所有的线程写入完成
+        while (walWriteCount.get() != 0) {
+            try {
+                if (System.currentTimeMillis() >= deadline) {
+                    //超时退出
+                    log.warn("{} close timeout, force shutdown", bucketName);
+                    return;
+                }
+                Thread.sleep(20);
+            } catch (Exception e) {
+            }
+        }
+    }
+
+    public boolean mappedFileIsEmpty() {
+        return mappedFiles.isEmpty();
     }
 
     public MemorySegment getBucketMetaFileSegment() {

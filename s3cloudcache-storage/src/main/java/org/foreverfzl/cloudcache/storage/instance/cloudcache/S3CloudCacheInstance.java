@@ -321,11 +321,11 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 try {
                     // 1：先将所有的 bucket 设置为关闭中，不可写入
                     writer.close();
-                    // 2：限时等待该 writer 完成写入
-                    writer.waitWriterFinished(writeDeadline);
                     String bucketName = writer.getBucketName();
                     CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
                     MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
+                    // 2：限时等待该 writer 完成写入
+                    mappedFileManager.waitWriterFinished(writeDeadline);
                     // 3：封口所有的 block
                     BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
                     blockMetaDataManager.trySealAllBlock();
@@ -342,7 +342,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     // 7：最后检查一遍文件，把能删除的文件删除
                     mappedFileManager.endChackMappedFile();
                     // 8：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
-                    if (!mappedFileManager.hasMappedFile()) {
+                    if (mappedFileManager.mappedFileIsEmpty()) {
                         MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
                         BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
                     }
