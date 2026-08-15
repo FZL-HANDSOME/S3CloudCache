@@ -112,7 +112,7 @@ public class BucketMetaInfoUtil {
             pos += 8;
 
             // 4. 读取 CRC (使用 JAVA_INT_UNALIGNED)
-            int crc = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
+            int oldCrc = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
             pos += 4;
 
             // 5. 读取 dataLen (使用 JAVA_INT_UNALIGNED)
@@ -124,14 +124,12 @@ public class BucketMetaInfoUtil {
             MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
             // 校验数据 CRC
             CRC32 crc32 = new CRC32();
-            crc32.update(isDirty);
             crc32.update(oldblockSize);
             crc32.update(Math.toIntExact(oldFileSize));
             crc32.update(dataLen);
             crc32.update(data);
-
             // bucketMeta 文件损坏，以前的文件无法恢复
-            if ((int) crc32.getValue() != crc) {
+            if ((int) crc32.getValue() != oldCrc) {
                 log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is {}", bucketMetaPath);
                 return null;
             }

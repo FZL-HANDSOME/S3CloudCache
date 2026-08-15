@@ -28,8 +28,8 @@ public class BucketMetaInfo {
 
     public BucketMetaInfo(int blockSize,long fileSize,  String s3KeyPrefix) {
         this.isDirty = 1;
-        this.fileSize = fileSize;
         this.blockSize = blockSize;
+        this.fileSize = fileSize;
         this.data = s3KeyPrefix.getBytes(StandardCharsets.UTF_8);
         this.dataLen = data.length;
         updateCrc();
@@ -49,7 +49,6 @@ public class BucketMetaInfo {
      */
     public void updateCrc() {
         CRC32 crc32 = new CRC32();
-        crc32.update(isDirty);
         crc32.update(this.blockSize);
         crc32.update(Math.toIntExact(this.fileSize));
         crc32.update(dataLen);
