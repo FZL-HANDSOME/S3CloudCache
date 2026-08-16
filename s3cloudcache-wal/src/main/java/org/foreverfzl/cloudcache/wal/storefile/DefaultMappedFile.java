@@ -175,6 +175,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
         while (true) {
             if (!posActive) return;
             int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
+            if (curReadBlockIndex == totalBlockCount) {
+                return;
+            }
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, curReadBlockIndex);
             //如果状态为1或者3，则代表数据全部落入到PageCache中
             if (state == 0) {
@@ -193,7 +196,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
             //刷盘成功更新指针
             READ_POSITION_UPDATER.set(this, expectedNewPosition);
             NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
-            log.info("ackReadPosition successfully,newReadpos is {}", expectedNewPosition);
+            DIRTY_UPDATER.set(this, 1);
+            log.info("fileName= {} ackReadPosition successfully,newReadpos= {}", this.fileFromOffset, expectedNewPosition);
         }
     }
 
@@ -210,6 +214,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
             if (!posActive) return;
             // 在循环外固定当前要检查的索引
             int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
+            if (currentIndex == totalBlockCount) {
+                return;
+            }
             // 检查当前索引位置是否已填坑
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, currentIndex);
             if (state == 0 || state == 1) {
@@ -360,6 +367,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 paddingPos = currentPos + remainingInBlock;
                 // 尝试 CAS 抢占这段残渣空间用来做 Padding
                 if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                    //如果是文件结尾则直接返回
+                    if (paddingPos == this.fileSize) {
+                        close(); //关闭文件
+                        return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                    }
                     // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
                     if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
                     // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间

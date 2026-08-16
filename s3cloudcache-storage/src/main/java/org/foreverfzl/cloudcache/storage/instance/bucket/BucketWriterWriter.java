@@ -1,7 +1,6 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
-import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
@@ -21,7 +20,6 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.CRC32;
 
 /**
@@ -76,7 +74,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 //将对应的物理block标记为删除
                 String s3Key = cacheBlockManager.deleteBlock(fileFromOffset, logicalIndex);
                 //将对应的元数据删除
-                blockMetaDataManager.deleteMetaData(fileFromOffset, logicalIndex);
+                blockMetaDataManager.deleteBlockMetaData(fileFromOffset, logicalIndex);
                 return new WriteResult(s3Key, -1, -1, false);
             }
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
@@ -113,11 +111,11 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     //监听死信队列的数据，内部指明了哪个bucket哪个文件哪个block中的数据上传不上去，
     //然后提供Reader给用户读取、上传、确认API
-    @Override
-    public MappedFileReader getDeadDataInfo() throws InterruptedException {
+    public MappedFileReader getUpLoadFailedBlockInfo() throws InterruptedException {
         DeadDataInfo deadDataInfo = blockMetaDataManager.getDeadDataInfo();
         long fileFromOffset = deadDataInfo.getFileFromOffset();
         int blockIndex = deadDataInfo.getLogicalIndex();
+        log.info("fileFromOffset={},blockIndex={} is consumed from deadQueue", fileFromOffset, blockIndex);
         DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
         if (mappedFile == null) {
             throw new NullPointerException("MappedFile is null");
@@ -136,8 +134,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
                 long fileFromOffset = task.getFileFromOffset();
                 int blockIndex = task.getBlockIndex();
+                log.info("fileFromOffset=>{}, blockIndex=>{} is Consumed from recoverQueue", fileFromOffset, blockIndex);
                 //先看看对应的block是否真正全部写入到PageCache或者落盘
-                BlockMetaData blockMetaData = blockMetaDataManager.get(fileFromOffset, blockIndex);
+                BlockMetaData blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
                 if (blockMetaData == null) {
                     continue;
                 }
@@ -190,7 +189,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         getBlockBrokenTaskThread.interrupt();
     }
 
-    public MappedFileManager getMappedManager(){
+    public MappedFileManager getMappedManager() {
         return mappedFileManager;
     }
 

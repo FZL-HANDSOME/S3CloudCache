@@ -5,6 +5,8 @@ import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -14,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class BlockMetaDataManager {
 
+    private static final Logger log = LoggerFactory.getLogger(BlockMetaDataManager.class);
     //key为fileFromOffset+blockIndex
     private final ConcurrentHashMap<Long, BlockMetaData> metaDataMap = new ConcurrentHashMap<>();
     //    //该bucket对应的 N 秒检查 时间超过 M秒 的Block进行封口上传的任务管理者
@@ -63,9 +66,21 @@ public class BlockMetaDataManager {
         blockRecoverQueue.submit(recoverTask);
     }
 
-    public void deleteMetaData(long fileFromOffset, int blockIndex) {
+    public void deleteBlockMetaData(long fileFromOffset, int blockIndex) {
         long key = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
         metaDataMap.remove(key);
+    }
+
+    public void deleteFileAllBlockMetaData(long fileFromOffset) {
+        int blockIndex = 0;
+        while (true) {
+            Long key = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
+            if (!metaDataMap.containsKey(key)) {
+                return;
+            }
+            metaDataMap.remove(key);
+            blockIndex++;
+        }
     }
 
 
@@ -79,16 +94,10 @@ public class BlockMetaDataManager {
     /**
      * 获取BlockMetaData
      */
-    public BlockMetaData get(long fileFromOffset, int blockIndex) {
+    public BlockMetaData getBlockMetaData(long fileFromOffset, int blockIndex) {
         return metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
-    /**
-     * 删除BlockMetaData
-     */
-    public void remove(long fileFromOffset, int blockIndex) {
-        metaDataMap.remove(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
-    }
 
     /**
      * 增加写入到PageCache的字节数，如果封口并且PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
@@ -125,7 +134,7 @@ public class BlockMetaDataManager {
      * 增加已经完成写入字节数
      */
     public void addFinishedBytes(long fileFromOffset, int blockIndex, int bytes) {
-        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
             return;
         }
@@ -136,8 +145,11 @@ public class BlockMetaDataManager {
      * CAS封口，并检查block的状态，从而进行不同的操作
      */
     public void trySeal(long fileFromOffset, int blockIndex) {
-        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
+            return;
+        }
+        if (blockMetaData.getState() == BlockMetaData.SEALED) {
             return;
         }
         boolean trySeal = false;
@@ -148,8 +160,8 @@ public class BlockMetaDataManager {
             //seal和broken状态存在竞争关系
             trySeal = blockMetaData.trySeal();
         }
-        //检查一下block是否可以上传，并且成功将block从封口状态修改为上传中
-        if (canUpload(fileFromOffset, blockIndex) && tryStartUpload(fileFromOffset, blockIndex)) {
+        //检查一下block是否可以上传
+        if (canUpload(fileFromOffset, blockIndex)) {
             blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
             return;
         }
@@ -181,7 +193,7 @@ public class BlockMetaDataManager {
      * CAS改为上传中
      */
     public boolean tryStartUpload(long fileFromOffset, int blockIndex) {
-        BlockMetaData blockMetaData = get(fileFromOffset, blockIndex);
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
             return false;
         }
@@ -193,14 +205,22 @@ public class BlockMetaDataManager {
      * CAS改为上传完成，也就是直接删除对应的元数据
      */
     public void markUploadSuccess(long fileFromOffset, int blockIndex) {
-        this.remove(fileFromOffset, blockIndex);
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
+        blockMetaData.markUploadSuccess();
     }
 
     /**
      * CAS改为上传失败
      */
     public void markUploadFailed(long fileFromOffset, int blockIndex, DeadDataInfo deadDataInfo) {
-        this.remove(fileFromOffset, blockIndex);
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
+        blockMetaData.markUploadFailed();
         deadDataQueue.submit(deadDataInfo);
     }
 
@@ -208,14 +228,18 @@ public class BlockMetaDataManager {
      * CAS改将上传失败改为上传中
      */
     public void retryUpload(long fileFromOffset, int blockIndex) {
-        get(fileFromOffset, blockIndex).retryUpload();
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return;
+        }
+        blockMetaData.retryUpload();
     }
 
     /**
      * 是否已经封口
      */
     public boolean isSealed(long fileFromOffset, int blockIndex) {
-        BlockMetaData metaData = get(fileFromOffset, blockIndex);
+        BlockMetaData metaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (metaData == null) return false;
         int state = metaData.getState();
         return state != 0;
@@ -230,7 +254,7 @@ public class BlockMetaDataManager {
      * 是否已经全部写入完成，可以上传
      */
     public boolean canUpload(long fileFromOffset, int blockIndex) {
-        BlockMetaData metaData = get(fileFromOffset, blockIndex);
+        BlockMetaData metaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (metaData == null) {
             return false;
         }

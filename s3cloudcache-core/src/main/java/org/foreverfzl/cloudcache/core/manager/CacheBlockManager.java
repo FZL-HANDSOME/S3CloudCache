@@ -97,7 +97,10 @@ public class CacheBlockManager {
         while (active) {
             try {
                 UploadTask task = blockMetaDataManager.getTaskFromUpLoadQueue();
-                CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(task.getFileFromOffset(), task.getLogicalIndex()));
+                long fileFromOffset = task.getFileFromOffset();
+                int logicalIndex = task.getLogicalIndex();
+                log.info("fileFromOffset={}, logicalIndex={} is consumed from upLoadQueue", fileFromOffset, logicalIndex);
+                CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(fileFromOffset, logicalIndex));
                 if (cacheBlock == null) {
                     return;
                 }

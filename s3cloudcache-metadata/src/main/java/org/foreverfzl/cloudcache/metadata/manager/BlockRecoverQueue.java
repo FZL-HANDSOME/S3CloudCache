@@ -1,6 +1,9 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
+import org.foreverfzl.cloudchache.common.LogName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 import java.util.concurrent.BlockingQueue;
@@ -13,10 +16,11 @@ import java.util.concurrent.LinkedBlockingQueue;
  * 该任务本质就是去对应文件的对应逻辑block中读取数据重新放入到物理Block中。
  */
 public class BlockRecoverQueue {
+    private static final Logger log = LoggerFactory.getLogger(LogName.RECOVE_RQUEUE);
     /**
      * 上传任务队列
      */
-    private final BlockingQueue<RecoverTask> uploadQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<RecoverTask> queue = new LinkedBlockingQueue<>();
 
     /**
      * 提交上传任务。
@@ -25,42 +29,43 @@ public class BlockRecoverQueue {
      * @return true 表示成功加入队列；false 表示该 Block 已经在队列中。
      */
     public boolean submit(RecoverTask task) {
-        return uploadQueue.offer(task);
+        log.info("fileFromOffset={},blockIndex={} is submited to the recovery queue", task.getFileFromOffset(), task.getBlockIndex());
+        return queue.offer(task);
     }
 
     /**
      * Core 上传线程阻塞获取任务。
      */
     public RecoverTask take() throws InterruptedException {
-        return uploadQueue.take();
+        return queue.take();
     }
 
     /**
      * 非阻塞获取一个上传任务。
      */
     public RecoverTask poll() {
-        return uploadQueue.poll();
+        return queue.poll();
     }
 
     /**
      * 当前等待上传的任务数量。
      */
     public int size() {
-        return uploadQueue.size();
+        return queue.size();
     }
 
     /**
      * 当前是否没有待上传任务。
      */
     public boolean isEmpty() {
-        return uploadQueue.isEmpty();
+        return queue.isEmpty();
     }
 
     /**
      * 清空所有上传任务。
      */
     public void clear() {
-        uploadQueue.clear();
+        queue.clear();
     }
 
 }

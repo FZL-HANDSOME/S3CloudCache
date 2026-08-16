@@ -129,4 +129,19 @@ public class MappedFileReader {
     public String getS3Key() {
         return s3Key;
     }
+
+    @Override
+    public String toString() {
+        return "MappedFileReader{" +
+                "instanceName='" + instanceName + '\'' +
+                ", bucketName='" + bucketName + '\'' +
+                ", fileFromOffset=" + fileFromOffset +
+                ", logicalIndex=" + logicalIndex +
+                ", s3Key='" + s3Key + '\'' +
+                ", defaultMappedFile=" + defaultMappedFile +
+                ", memorySegment=" + memorySegment +
+                ", endPosition=" + endPosition +
+                ", curPosition=" + curPosition +
+                '}';
+    }
 }

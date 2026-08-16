@@ -100,7 +100,7 @@ public class MappedFileManager {
 
     //启动线程，创建初始文件等
     private void init(long fromOffset) {
-//        chackMappedFileThread.start();
+        chackMappedFileThread.start();
         fileMetaFlushThread.start();
         flushFileReadPositionThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
@@ -111,32 +111,79 @@ public class MappedFileManager {
 
     public AppendMessageResult appendData(final DataStruct dataStruct) {
         AppendMessageResult result = null;
-        DefaultMappedFile oldMappedFile = activeMappedFile.get();
-        oldMappedFile.hold();
         walWriteCount.incrementAndGet();
         try {
-            //先去目前活跃的文件中添加数据
-            result = oldMappedFile.appendData(dataStruct);
-            //如果是文件结尾或者关闭，则创建新的文件进行写
-            AppendMessageResult.AppendStatus status = result.getStatus();
-            if (status == AppendMessageResult.AppendStatus.END_OF_FILE
-                    || status == AppendMessageResult.AppendStatus.FILE_CLOSED) {
-                //获取最新的写文件
+            while (true) {
+                DefaultMappedFile oldMappedFile = activeMappedFile.get();
+                oldMappedFile.hold();
+                try {
+                    // 先去目前活跃的文件中添加数据
+                    result = oldMappedFile.appendData(dataStruct);
+                } finally {
+                    oldMappedFile.release();
+                }
+                AppendMessageResult.AppendStatus status = result.getStatus();
+                // 写成功，结束循环
+                if (status == AppendMessageResult.AppendStatus.PUT_OK) {
+                    break;
+                }
+                if (status != AppendMessageResult.AppendStatus.END_OF_FILE & status != AppendMessageResult.AppendStatus.FILE_CLOSED) {
+                    //除了OK、END、CLOSE其它都直接返回
+                    break;
+                }
+                // 文件结尾，创建新的文件
                 long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
                 DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
                 if (newFile != null) {
                     activeMappedFile.compareAndSet(oldMappedFile, newFile);
-                    //然后使用新的文件进行写
-                    oldMappedFile = activeMappedFile.get();
-                    result = oldMappedFile.appendData(dataStruct);
+                } else {
+                    break;
                 }
             }
         } finally {
-            oldMappedFile.release();
             walWriteCount.decrementAndGet();
         }
         return result;
     }
+
+
+//    public AppendMessageResult appendData(final DataStruct dataStruct) {
+//        AppendMessageResult result = null;
+//        walWriteCount.incrementAndGet();
+//        DefaultMappedFile oldMappedFile = null;
+//        try {
+//            oldMappedFile = activeMappedFile.get();
+//            oldMappedFile.hold();
+//            try {
+//                //先去目前活跃的文件中添加数据
+//                result = oldMappedFile.appendData(dataStruct);
+//            } finally {
+//                oldMappedFile.release();
+//            }
+//            //如果是文件结尾或者关闭，则创建新的文件进行写
+//            AppendMessageResult.AppendStatus status = result.getStatus();
+//            if (status == AppendMessageResult.AppendStatus.END_OF_FILE
+//                    || status == AppendMessageResult.AppendStatus.FILE_CLOSED) {
+//                //获取最新的写文件
+//                long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
+//                DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
+//                if (newFile != null) {
+//                    activeMappedFile.compareAndSet(oldMappedFile, newFile);
+//                    oldMappedFile = activeMappedFile.get();
+//                    oldMappedFile.hold();
+//                    try {
+//                        //然后使用新的文件进行写
+//                        result = oldMappedFile.appendData(dataStruct);
+//                    } finally {
+//                        oldMappedFile.release();
+//                    }
+//                }
+//            }
+//        } finally {
+//            walWriteCount.decrementAndGet();
+//        }
+//        return result;
+//    }
 
 
     /**
@@ -231,6 +278,9 @@ public class MappedFileManager {
             if (!values.isEmpty()) {
                 for (DefaultMappedFile file : values) {
                     if (file.canClean()) {
+                        long fileFromOffset = file.fileFromOffset;
+                        //删除该文件对应的所有元数据
+                        blockMetaDataManager.deleteFileAllBlockMetaData(fileFromOffset);
                         //清除资源
                         file.clean();
                         //删除文件

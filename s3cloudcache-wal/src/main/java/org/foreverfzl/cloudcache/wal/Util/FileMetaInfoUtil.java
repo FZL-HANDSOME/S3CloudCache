@@ -19,6 +19,7 @@ public class FileMetaInfoUtil {
     //刷新文件开头4KB元数据区域
     public static void flushFileMetaInfo(DefaultMappedFile mappedFile) {
         try {
+            long fileFromOffset = mappedFile.fileFromOffset;
             long readPos = mappedFile.readPosition;
             long uploadPos = mappedFile.upLoadPosition;
             // Use file creation time if needed; fall back to current time.
@@ -31,10 +32,10 @@ public class FileMetaInfoUtil {
             metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
             pos += Long.BYTES;
             metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
-            log.info("flushFileMetaInfo successfully, readPosL:{},uploadPos:{},updateTime:{}", readPos, uploadPos, updateTime);
+            log.info("fileName= {} flushFileMetaInfo successfully, readPos={},uploadPos={},updateTime={}", fileFromOffset, readPos, uploadPos, updateTime);
             // Ensure durability.
             metaSegment.force();
-            if (mappedFile.fileFromOffset == readPos && mappedFile.upLoadPosition == uploadPos) {
+            if (mappedFile.readPosition == readPos && mappedFile.upLoadPosition == uploadPos) {
                 DefaultMappedFile.DIRTY_UPDATER.compareAndSet(mappedFile, 1, 0);
             }
         } catch (Exception e) {

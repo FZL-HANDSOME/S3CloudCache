@@ -49,7 +49,7 @@ public class WalInstanceBucketManager {
             locks[i] = new ReentrantLock();
         }
         //todo 记得改回15秒
-        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 5, 5, TimeUnit.SECONDS);
+        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 0, 2, TimeUnit.SECONDS);
     }
 
     private void checkBlockMeta() {

@@ -54,7 +54,7 @@ public class CacheBlockUpdater {
         }
         long fileFromOffset = block.getFileFromOffset();
         int logicalIndex = block.getLogicalIndex();
-        if(!manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex)){
+        if (!manager.blockMetaDataManager.tryStartUpload(fileFromOffset, logicalIndex)) {
             //如果CAS标记为上传中 失败，说明其它线程进行上传了
             return;
         }
@@ -67,7 +67,8 @@ public class CacheBlockUpdater {
         block.getReference();
         manager.upCount.incrementAndGet();
         try {
-            s3VirtualExecutor.submit(() -> executeUploadTask(block));
+            executeUploadTask(block);
+//            s3VirtualExecutor.submit(() -> executeUploadTask(block));
         } catch (RejectedExecutionException e) {
             manager.upCount.decrementAndGet();
             block.releaseReference();
@@ -92,6 +93,7 @@ public class CacheBlockUpdater {
                     block.setClean();
                     break;
                 }
+                Thread.sleep(1000);
             }
             if (!isSuccess) {
                 throw new CoreException("Failed to upload block");
@@ -100,7 +102,7 @@ public class CacheBlockUpdater {
             Thread.currentThread().interrupt();
             handleUploadFailure(block);
         } catch (Exception e) {
-            log.warn("S3 upload failed, instance={}, bucket={}, block={}",
+            log.error("S3 upload failed, instance={}, bucket={}, block={}",
                     manager.instanceName, manager.bucketName, block, e);
             handleUploadFailure(block);
         } finally {

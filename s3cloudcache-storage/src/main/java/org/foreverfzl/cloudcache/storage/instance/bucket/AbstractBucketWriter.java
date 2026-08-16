@@ -43,7 +43,7 @@ public abstract class AbstractBucketWriter implements Writer {
     /**
      * 监听死信队列中的数据
      */
-    public abstract MappedFileReader getDeadDataInfo() throws InterruptedException;
+    public abstract MappedFileReader getUpLoadFailedBlockInfo() throws InterruptedException;
 
 
 }

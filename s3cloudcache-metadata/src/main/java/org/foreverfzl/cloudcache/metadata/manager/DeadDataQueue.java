@@ -1,6 +1,9 @@
 package org.foreverfzl.cloudcache.metadata.manager;
 
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
+import org.foreverfzl.cloudchache.common.LogName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -9,10 +12,11 @@ import java.util.concurrent.LinkedBlockingQueue;
  * 专门存放上传不上去的数据
  */
 public class DeadDataQueue {
+    private static final Logger log = LoggerFactory.getLogger(LogName.DEADDATA_QUEUE);
     /**
      * 上传任务队列
      */
-    private final BlockingQueue<DeadDataInfo> uploadQueue = new LinkedBlockingQueue<>();
+    private final BlockingQueue<DeadDataInfo> queue = new LinkedBlockingQueue<>();
 
     /**
      * 提交上传任务。
@@ -21,41 +25,43 @@ public class DeadDataQueue {
      * @return true 表示成功加入队列；false 表示该 Block 已经在队列中。
      */
     public boolean submit(DeadDataInfo task) {
-        return uploadQueue.offer(task);
+        log.info("instance={},bucketName={},S3key={},fileFromOffset={},blockIndex={} is submited to the recoveryQueue", task.getInstanceName(),
+                task.getBucketName(), task.getS3Key(), task.getFileFromOffset(), task.getLogicalIndex());
+        return queue.offer(task);
     }
 
     /**
      * Core 上传线程阻塞获取任务。
      */
     public DeadDataInfo take() throws InterruptedException {
-        return uploadQueue.take();
+        return queue.take();
     }
 
     /**
      * 非阻塞获取一个上传任务。
      */
     public DeadDataInfo poll() {
-        return uploadQueue.poll();
+        return queue.poll();
     }
 
     /**
      * 当前等待上传的任务数量。
      */
     public int size() {
-        return uploadQueue.size();
+        return queue.size();
     }
 
     /**
      * 当前是否没有待上传任务。
      */
     public boolean isEmpty() {
-        return uploadQueue.isEmpty();
+        return queue.isEmpty();
     }
 
     /**
      * 清空所有上传任务。
      */
     public void clear() {
-        uploadQueue.clear();
+        queue.clear();
     }
 }
