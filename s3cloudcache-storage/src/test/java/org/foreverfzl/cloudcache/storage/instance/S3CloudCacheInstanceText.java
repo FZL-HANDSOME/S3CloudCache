@@ -2,7 +2,6 @@ package org.foreverfzl.cloudcache.storage.instance;
 
 import org.foreverfzl.cloudcache.storage.factory.S3ClientFactory;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
-import org.foreverfzl.cloudcache.storage.instance.bucket.MappedFileReader;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
@@ -55,31 +54,36 @@ public class S3CloudCacheInstanceText {
         //获取特定的Bucket高效写入
         BucketWriterWriter bucketWriter = textInstance.getBucketWriterInstance("textbucket");
 
-        for (int i = 0; i < 1; i++) {
-            String value = "2026-07-11 16:42:18.726 INFO [WAL-PRESS-THREAD-0047] c.foreverfzl.cloudcache.wal.BlockUploadManager - traceId=73ac92f0d1e64489b21d56ce29f1765e,dataId=001256,blockKey=65892104572164,threadId=47,seq=1295 | upload minio object success, bucket=cn-local-wal,objectKey=wal/00000000000000001024/47,blockSize=536byte,useTime=18ms,enableHeadCheck=true | msg=wal block async upload finished, cache meta updated, pending flush count=32,current memory hold bytes=12582912,free os memory=2145896448";
-            WriteResult result = bucketWriter.write(value.getBytes(StandardCharsets.UTF_8));
-            if (result.isSuccess()) {
-                System.out.println(result.getS3Key());
-                System.out.println(result.getOffset());
-                System.out.println(result.getSize());
-            }
-        }
+//        for (int i = 0; i < 2; i++) {
+//            String value = "2026-07-11 16:42:18.726 INFO [WAL-PRESS-THREAD-0047] c.foreverfzl.cloudcache.wal.BlockUploadManager - traceId=73ac92f0d1e64489b21d56ce29f1765e,dataId=001256,blockKey=65892104572164,threadId=47,seq=1295 | upload minio object success, bucket=cn-local-wal,objectKey=wal/00000000000000001024/47,blockSize=536byte,useTime=18ms,enableHeadCheck=true | msg=wal block async upload finished, cache meta updated, pending flush count=32,current memory hold bytes=12582912,free os memory=2145896448";
+//            WriteResult result = bucketWriter.write(value.getBytes(StandardCharsets.UTF_8));
+//            if (result.isSuccess()) {
+//                System.out.println(result.getS3Key());
+//                System.out.println(result.getOffset());
+//                System.out.println(result.getSize());
+//            }
+//        }
         Scanner scanner = new Scanner(System.in);
-        for (int i = 0; i < 2; i++) {
-            System.out.println("输入数据");
-            String s = scanner.nextLine();
-            WriteResult result = bucketWriter.write(s.getBytes(StandardCharsets.UTF_8));
-            if (result.isSuccess()) {
-                System.out.println(result.getS3Key());
-                System.out.println(result.getOffset());
-                System.out.println(result.getSize());
-            }
-        }
-        System.out.println("请输入数字");
         if (scanner.nextInt() == 1) {
 
         }
-        textInstance.close(10000, 10000);
+
+
+//        for (int i = 0; i < 2; i++) {
+//            System.out.println("输入数据");
+//            String s = scanner.nextLine();
+//            WriteResult result = bucketWriter.write(s.getBytes(StandardCharsets.UTF_8));
+//            if (result.isSuccess()) {
+//                System.out.println(result.getS3Key());
+//                System.out.println(result.getOffset());
+//                System.out.println(result.getSize());
+//            }
+//        }
+//        System.out.println("请输入数字");
+//        if (scanner.nextInt() == 1) {
+//
+//        }
+        textInstance.close(15000, 15000);
     }
 
 
@@ -262,17 +266,17 @@ public class S3CloudCacheInstanceText {
         long valueBytes = 0;
         CRC32 crc32 = new CRC32();
         while (position < walFile.wrotePosition) {
-            int magic = walFile.getInt(position);
+            int magic = walFile.getIntFromDataArea(position);
             if (magic != DataStruct.MAGIC_NUMBER) {
                 throw new AssertionError("Invalid WAL magic at logical offset " + position);
             }
-            int expectedChecksum = walFile.getInt(position + Integer.BYTES);
-            int valueLength = walFile.getInt(position + Integer.BYTES * 2L);
+            int expectedChecksum = walFile.getIntFromDataArea(position + Integer.BYTES);
+            int valueLength = walFile.getIntFromDataArea(position + Integer.BYTES * 2L);
             if (valueLength != payloadSize) {
                 throw new AssertionError("Unexpected value length " + valueLength + " at logical offset " + position);
             }
 
-            byte[] value = walFile.getOrgData(position + DataStruct.HEADER_LENGTH, valueLength);
+            byte[] value = walFile.getOrgDataFromDataArea(position + DataStruct.HEADER_LENGTH, valueLength);
             crc32.reset();
             crc32.update(value);
             if ((int) crc32.getValue() != expectedChecksum) {

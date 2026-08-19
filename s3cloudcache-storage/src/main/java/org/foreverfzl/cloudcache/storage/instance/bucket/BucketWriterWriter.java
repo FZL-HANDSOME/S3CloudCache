@@ -156,13 +156,13 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 CRC32 crc = new CRC32();
                 //如果可以读int并且是正常数据则读取
                 //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
-                while (endPos - pos >= 4 && mappedFile.getInt(pos) == DataStruct.MAGIC_NUMBER) {
+                while (endPos - pos >= 4 && mappedFile.getIntFromDataArea(pos) == DataStruct.MAGIC_NUMBER) {
                     pos += 4;
-                    int chackSum = mappedFile.getInt(pos);
+                    int chackSum = mappedFile.getIntFromDataArea(pos);
                     pos += 4;
-                    int dataLen = mappedFile.getInt(pos);
+                    int dataLen = mappedFile.getIntFromDataArea(pos);
                     pos += 4;
-                    byte[] orgData = mappedFile.getOrgData(pos, dataLen);
+                    byte[] orgData = mappedFile.getOrgDataFromDataArea(pos, dataLen);
                     pos += dataLen;
                     crc.update(orgData);
                     int cs = (int) crc.getValue();

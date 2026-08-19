@@ -1,8 +1,9 @@
 package org.foreverfzl.cloudcache.wal.storefile;
 
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
-import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
@@ -90,9 +91,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
 
-    public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset,
-                             final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory,
-                             MappedFileManager manager) {
+    public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset, final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
         this.posActive = true;
         this.fileName = fileName;
         this.fileSize = fileSize;
@@ -110,9 +109,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
     /**
      * 创建文件方法
      */
-    public static DefaultMappedFile createFile(final String dirPath, final String fileName, final long fileFromOffset,
-                                               final long fileSize, final int blockSize, boolean isWarm,
-                                               boolean isLockMemory, MappedFileManager manager) {
+    public static DefaultMappedFile createFile(final String dirPath, final String fileName, final long fileFromOffset, final long fileSize, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
         if (fileName == null || fileName.isBlank()) {
             throw new WalException("fileName cannot be null");
         }
@@ -161,9 +158,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 warm(16384, isLockMemory);
             }
         } catch (Exception e) {
-            throw new WalException(
-                    "Failed to initialize cache file: " + fileName, e
-            );
+            throw new WalException("Failed to initialize cache file: " + fileName, e);
         }
     }
 
@@ -280,26 +275,19 @@ public class DefaultMappedFile extends AbstractMappedFile {
         }
     }
 
-    //从指定位置获取一个int
-    public int getInt(long fromOffset) {
+    //跳过开头元数据区域获取数据
+    public int getIntFromDataArea(long fromOffset) {
         return mappedMemorySegment.get(JAVA_INT, FileMetaInfo.FILE_META_SIZE + fromOffset);
     }
 
-    public long getLong(long fromOffset) {
+    public long getLongFromDataArea(long fromOffset) {
         return mappedMemorySegment.get(JAVA_LONG, FileMetaInfo.FILE_META_SIZE + fromOffset);
     }
 
     //从指定位置获取大小为sie的原始数据
-    public byte[] getOrgData(long fromOffset, int size) {
+    public byte[] getOrgDataFromDataArea(long fromOffset, int size) {
         byte[] valueBytes = new byte[size];
-        MemorySegment.copy(
-                mappedMemorySegment,
-                ValueLayout.JAVA_BYTE,
-                FileMetaInfo.FILE_META_SIZE + fromOffset,
-                valueBytes,
-                0,
-                size
-        );
+        MemorySegment.copy(mappedMemorySegment, ValueLayout.JAVA_BYTE, FileMetaInfo.FILE_META_SIZE + fromOffset, valueBytes, 0, size);
         return valueBytes;
     }
 
@@ -330,87 +318,89 @@ public class DefaultMappedFile extends AbstractMappedFile {
         long newPos;
         //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
         //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
-        int logicalIndex;
+        int logicalIndex = -1;
+        AppendMessageResult result = null;
+        BlockMetaData blockMetaData = null;
+        BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
         //获取该文件的引用
-        while (true) {
-            currentPos = WROTE_POSITION_UPDATER.get(this);
-            newPos = currentPos + msgSize;
-            logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
-            // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
-            long blockOffset = currentPos & (this.blockSize - 1);
-            long remainingInBlock = this.blockSize - blockOffset;
-            long paddingPos;
-            if (msgSize > remainingInBlock) {
-                // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
-                paddingPos = currentPos + remainingInBlock;
-                //看看文件是否结尾
-                // 尝试 CAS 抢占这段残渣空间用来做 Padding
-                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                    manager.blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex); //将该block设置为封口
-                    // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
-                    //padding至少4字节，如果少于4字节不做padding
-                    if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
-                    //如果是文件结尾则直接返回
-                    if (paddingPos == this.fileSize) {
-                        close(); //关闭文件
-                        return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+        this.hold();
+        try {
+            while (true) {
+                currentPos = WROTE_POSITION_UPDATER.get(this);
+                newPos = currentPos + msgSize;
+                logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
+                // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
+                long blockOffset = currentPos & (this.blockSize - 1);
+                long remainingInBlock = this.blockSize - blockOffset;
+                long paddingPos;
+                if (msgSize > remainingInBlock) {
+                    // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
+                    paddingPos = currentPos + remainingInBlock;
+                    //看看文件是否结尾
+                    // 尝试 CAS 抢占这段残渣空间用来做 Padding
+                    if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                        //将该block设置为封口
+                        if ((blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex) & 1) == 1) {
+                            setBlockStateArrayFinishedPageCache(logicalIndex);
+                        }
+                        //如果是文件结尾则直接返回
+                        if (paddingPos == this.fileSize) {
+                            close(); //关闭文件
+                            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                        }
+                        // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
+                        continue;
                     }
-                    // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
+                    Thread.onSpinWait();
                     continue;
                 }
-                Thread.onSpinWait();
-                continue;
-            }
-            //检查该block是否已经封口
-            if (manager.blockMetaDataManager.isSealed(this.fileFromOffset, logicalIndex)) {
-                //封口了则尝试将指针设置为下一个Block起点
-                paddingPos = currentPos + remainingInBlock;
-                // 尝试 CAS 抢占这段残渣空间用来做 Padding
-                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                    //如果是文件结尾则直接返回
-                    if (paddingPos == this.fileSize) {
-                        close(); //关闭文件
-                        return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                //检查该block是否已经封口
+                if (blockMetaDataManager.isSealed(this.fileFromOffset, logicalIndex)) {
+                    //封口了则尝试将指针设置为下一个Block起点
+                    paddingPos = currentPos + remainingInBlock;
+                    // 尝试 CAS 抢占这段残渣空间用来做 Padding
+                    if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                        //如果是文件结尾则直接返回
+                        if (paddingPos == this.fileSize) {
+                            close(); //关闭文件
+                            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                        }
+                        // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
+                        continue;
                     }
-                    // 占位成功，当前线程负责将 [currentPos, paddingPos) 区间执行 Padding 填充
-                    if (remainingInBlock >= 4) doPadding(currentPos, (int) remainingInBlock);
-                    // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
-                    continue;
+                    Thread.onSpinWait();
                 }
+                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
+                    //抢成功跳出循环
+                    break;
+                }
+                // CAS失败，提示CPU这是spin等待
                 Thread.onSpinWait();
             }
-            if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
-                //抢成功跳出循环
-                break;
+            int dataSize = dataStruct.getDataLen();
+            //增加期望字节数
+            blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataSize);
+            //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
+            if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
+                manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + FileMetaInfo.FILE_META_SIZE + fileSize);
             }
-            // CAS失败，提示CPU这是spin等待
-            Thread.onSpinWait();
-        }
-        int dataSize = dataStruct.getDataLen();
-        //增加期望字节数
-        manager.blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataSize);
-        //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
-        if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
-            manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + FileMetaInfo.FILE_META_SIZE + fileSize);
-        }
-        // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
-        //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
-        AppendMessageResult result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
-        if (result.isOk()) {
-            result.setLogicalIndex(logicalIndex);
-            //写入成功，增加写入到PageCache字节数
-            if (manager.blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize)) {
-                //如果返回true则代表该blick中的数据全部写入到pageCache中，则可以将数组对应位置设置为1，可以手动刷盘更新read指针
+            // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
+            //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
+            result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
+            if (result.isOk()) {
+                result.setLogicalIndex(logicalIndex);
+                //写入成功，增加写入到PageCache字节数
+                blockMetaData = blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize);
+            }
+        } finally {
+            int release = this.release();
+            if (release == 0 && blockMetaData != null && logicalIndex != -1
+                    && blockMetaDataManager.isAllDataWriteInPageCache(blockMetaData)) {
+                //最后一个线程去检查全部数据是否全部写入到PageCache中
                 setBlockStateArrayFinishedPageCache(logicalIndex);
             }
         }
         return result;
-    }
-
-    private void doPadding(long startPos, int length) {
-        MemorySegment segment = mappedMemorySegment.asSlice(FileMetaInfo.FILE_META_SIZE + startPos, length);
-        segment.set(JAVA_INT, 0, PaddingStruct.PADDING_MAGIC);
-        // 性能开销几乎为 0，同时完美解决了文件自解析和读取器阻塞的问题
     }
 
     /**
@@ -434,14 +424,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
             dataStruct.writeTo(targetSlice);
-            return new AppendMessageResult(this,
-                    AppendMessageResult.AppendStatus.PUT_OK,
-                    System.currentTimeMillis(),
-                    this.fileFromOffset
-            );
+            return new AppendMessageResult(this, AppendMessageResult.AppendStatus.PUT_OK, System.currentTimeMillis(), this.fileFromOffset);
         } catch (Exception e) {
-            log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}",
-                    writeOffset, size, fileName, e);
+            log.error("doAppend: failed to write data to mappedMemorySegment, writeOffset={}, size={}, fileName={}", writeOffset, size, fileName, e);
             //出现异常关闭文件
             this.close();
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.WRITER_FAILED, this.fileFromOffset);

@@ -44,15 +44,16 @@ public class FileMetaInfoUtil {
     }
 
     public static FileMetaInfo getFileMetaInfo(DefaultMappedFile mappedFile) {
-        long curPos = 0;
         if (mappedFile == null) {
             return null;
         }
-        long readPos = mappedFile.getLong(curPos);
+        MemorySegment metaSegment = mappedFile.getMappedMemorySegmentSlice(0, FileMetaInfo.FILE_META_SIZE);
+        long curPos = 0;
+        long readPos = metaSegment.get(ValueLayout.JAVA_LONG, curPos);
         curPos += 8;
-        long updatePos = mappedFile.getLong(curPos);
+        long updatePos = metaSegment.get(ValueLayout.JAVA_LONG, curPos);
         curPos += 8;
-        long updateTime = mappedFile.getLong(curPos);
+        long updateTime = metaSegment.get(ValueLayout.JAVA_LONG, curPos);
         return new FileMetaInfo(readPos, updatePos, updateTime);
     }
 }

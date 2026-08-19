@@ -2,10 +2,8 @@ package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
-import org.foreverfzl.cloudcache.wal.datastruct.PaddingStruct;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
-import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.NoSuchElementException;
@@ -40,67 +38,44 @@ public class MappedFileReader {
     /**
      * 判断当前位置是否已经到达当前块的结尾。
      *
-     * <p>块剩余空间小于一个 int，或当前位置为 Padding 标记时，均表示该块已结束。</p>
+     * <p>块剩余空间小于等于固定头部大小，或当前位置为 Padding 标记时，均表示该块已结束。</p>
      */
     public boolean hasNext() {
-        if (endPosition - curPosition < Integer.BYTES) {
+        if (endPosition - curPosition <= DataStruct.HEADER_LENGTH) {
             return false;
         }
-        return memorySegment.get(ValueLayout.JAVA_INT, curPosition) != PaddingStruct.PADDING_MAGIC;
+        return memorySegment.get(ValueLayout.JAVA_INT, curPosition) == DataStruct.MAGIC_NUMBER;
     }
 
     /**
      * 读取下一条记录的 Value Bytes，并将读取位置推进到下一条记录。
+     * 如果下一条数据没有数据，则返回null
      *
      * @return 当前记录的 Value Bytes
      * @throws NoSuchElementException 当前位置已到达块结尾
      * @throws IllegalStateException  记录头或 Value 长度超出当前块范围
      */
     public byte[] next() {
-        if (!hasNext()) {
-            throw new NoSuchElementException("No more records in mapped block");
-        }
         int valueLength = currentValueLength();
+        if (valueLength == 0) {
+            return null;
+        }
         byte[] valueBytes = new byte[valueLength];
         MemorySegment.copy(memorySegment, ValueLayout.JAVA_BYTE,
                 curPosition + DataStruct.HEADER_LENGTH, valueBytes, 0, valueLength);
-        curPosition += DataStruct.HEADER_LENGTH + valueLength;
+        curPosition += (DataStruct.HEADER_LENGTH + valueLength + 3) & ~3;
         return valueBytes;
-    }
-
-    /**
-     * 将当前位置之后的所有 Value Bytes 连续复制到一段堆外内存中。
-     *
-     * <p>内部按当前映射块的大小分配堆外内存；返回的切片长度恰好等于所有
-     * Value Bytes 的总长度，不包含协议头和块末尾的 Padding。调用后读取位置
-     * 会推进到当前块的结尾。</p>
-     */
-    public MemorySegment readAll() {
-        MemorySegment target = Arena.ofAuto().allocate(defaultMappedFile.getBlockSize());
-        long targetPosition = 0;
-
-        while (hasNext()) {
-            int valueLength = currentValueLength();
-            MemorySegment.copy(memorySegment, ValueLayout.JAVA_BYTE,
-                    curPosition + DataStruct.HEADER_LENGTH,
-                    target, ValueLayout.JAVA_BYTE, targetPosition, valueLength);
-            curPosition += DataStruct.HEADER_LENGTH + valueLength;
-            targetPosition += valueLength;
-        }
-        return target;
     }
 
     private int currentValueLength() {
         long remaining = endPosition - curPosition;
-        if (remaining < DataStruct.HEADER_LENGTH) {
-            throw new IllegalStateException("Incomplete record header at position " + curPosition);
+        if (remaining <= DataStruct.HEADER_LENGTH) {
+            return 0;
         }
-
         int valueLength = memorySegment.get(ValueLayout.JAVA_INT,
                 curPosition + Integer.BYTES * 2L);
-        if (valueLength < 0 || valueLength > remaining - DataStruct.HEADER_LENGTH) {
-            throw new IllegalStateException("Invalid value length " + valueLength
-                    + " at position " + curPosition);
+        if (valueLength <= 0) {
+            return 0;
         }
         return valueLength;
     }
@@ -128,6 +103,22 @@ public class MappedFileReader {
 
     public String getS3Key() {
         return s3Key;
+    }
+
+    public long getCurPosition() {
+        return curPosition;
+    }
+
+    public long getEndPosition() {
+        return endPosition;
+    }
+
+    public MemorySegment getMemorySegment() {
+        return memorySegment;
+    }
+
+    public void setCurPosition(long curPosition) {
+        this.curPosition = curPosition;
     }
 
     @Override

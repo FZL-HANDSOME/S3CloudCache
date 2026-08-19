@@ -31,23 +31,23 @@ public class BlockMetaDataManager {
     }
 
     //该方法返回true则代表成功的将最后一个长时间不写block封口
-    public void chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
+    public int chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
         BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
         if (blockMetaData == null) {
-            return;
+            return 0;
         }
         if (blockMetaData.getState() != BlockMetaData.OPEN) {
             //如果不是开放状态则不检查
-            return;
+            return 0;
         }
         //计算差值
         long delta = curTime - blockMetaData.getLastActiveTime();
         if (delta <= maxFreeTime) {
             //不满足时间差
-            return;
+            return 0;
         }
         //满足时间差封口，上传
-        trySeal(fileFromOffset, blockIndex);
+        return trySeal(fileFromOffset, blockIndex);
     }
 
     public DeadDataInfo getDeadDataInfo() throws InterruptedException {
@@ -98,27 +98,6 @@ public class BlockMetaDataManager {
         return metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
 
-
-    /**
-     * 增加写入到PageCache的字节数，如果封口并且PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
-     * 该方法返回true则代表可以将对应文件的对应block设置为1(可以刷新状态)
-     * 这里只保证了正常情况下block的检查，项目close和N秒后不写入自动封口这两种情况不在这个方法考虑范围内
-     */
-    public boolean addPageCacheBytes(long fileFromOffset, int blockIndex, int bytes) {
-        BlockMetaData blockMetaData = getOrCreate(fileFromOffset, blockIndex);
-        if (blockMetaData == null) {
-            return false;
-        }
-        blockMetaData.addPageCacheBytes(bytes);
-        blockMetaData.updateLastTime();
-        //如果该block写入数据没有错误，并且封口了，并且全部数据写入到PageCache中 返回true
-        if (blockMetaData.getState() == BlockMetaData.SEALED
-                && blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
-            return true;
-        }
-        return false;
-    }
-
     /**
      * 增加期待写入字节数
      */
@@ -128,6 +107,31 @@ public class BlockMetaDataManager {
             return;
         }
         blockMetaData.addExpectedBytes(bytes);
+    }
+
+
+    /**
+     * 增加写入到PageCache的字节数，如果封口并且PageCache字节数==的期望字节数 说明该BLOCK可以被专门的先刷盘更新read指针
+     * 该方法返回true则代表可以将对应文件的对应block设置为1(可以刷新状态)
+     * 这里只保证了正常情况下block的检查，项目close和N秒后不写入自动封口这两种情况不在这个方法考虑范围内
+     */
+    public BlockMetaData addPageCacheBytes(long fileFromOffset, int blockIndex, int bytes) {
+        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            return null;
+        }
+        blockMetaData.addPageCacheBytes(bytes);
+        blockMetaData.updateLastTime();
+        return blockMetaData;
+    }
+
+    //检查该block的元数据，看看是否全部数据写入到操作系统的PageCache中
+    public boolean isAllDataWriteInPageCache(BlockMetaData blockMetaData) {
+        if (blockMetaData.getState() == BlockMetaData.SEALED
+                && blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -143,32 +147,44 @@ public class BlockMetaDataManager {
 
     /**
      * CAS封口，并检查block的状态，从而进行不同的操作
+     * 返回0代表 方法正常结束。
+     * 返回1代表需要将文件中的数组对应位置设置为1
      */
-    public void trySeal(long fileFromOffset, int blockIndex) {
+    public int trySeal(long fileFromOffset, int blockIndex) {
         BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (blockMetaData == null) {
-            return;
+            return 0;
         }
         if (blockMetaData.getState() == BlockMetaData.SEALED) {
-            return;
+            return 0;
         }
         boolean trySeal = false;
         synchronized (blockMetaData) {
             if (blockMetaData.getState() == BlockMetaData.SEALED) {
-                return;
+                return 0;
             }
             //seal和broken状态存在竞争关系
             trySeal = blockMetaData.trySeal();
         }
+        int ans = 0;
+        if (blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
+            //然后将文件中的数组位置改为1，代表可以更新read指针
+            //如果该条件命中，则0位置设置为1
+            ans = ans | 1;
+        }
         //检查一下block是否可以上传
         if (canUpload(fileFromOffset, blockIndex)) {
             blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
-            return;
+            //如果上传了则将1位置设置为1
+            ans = ans | (1 << 1);
         }
         //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
         if (trySeal && blockMetaData.isBroken()) {
             blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+            //如果破损了则将2位置设置为1
+            ans = ans | (1 << 2);
         }
+        return ans;
     }
 
     //将对应的元数据设置为Broke

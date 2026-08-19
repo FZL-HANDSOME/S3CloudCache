@@ -73,7 +73,11 @@ public class WalInstanceBucketManager {
                 int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(wrotePosition, blockSize));
                 //获取该fileManager对应的元数据管理者
                 BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
+                int state = blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
+                if ((state & 1) == 1) {
+                    //需要将对应文件中的block数组对应位置设置为1，方便刷盘
+                    activeFile.setBlockStateArrayFinishedPageCache(blockIndex);
+                }
             }
         } catch (Exception e) {
             log.warn("checkBlockMeta Task Failed", e);

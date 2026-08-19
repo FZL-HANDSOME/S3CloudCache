@@ -213,7 +213,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
             CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
             //恢复wal目录下的数据
-            futures.add(recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix,recoverExecutorService));
+            futures.add(recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix, recoverExecutorService));
         } catch (Exception e) {
 
         }
@@ -272,13 +272,21 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(curPos, oldblockSize));
                     //如果可以读int并且是正常数据则读取
                     //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
-                    while (endPos - curPos >= 4 && defaultMappedFile.getInt(curPos) == DataStruct.MAGIC_NUMBER) {
+                    while (true) {
+                        if (endPos - curPos <= DataStruct.HEADER_LENGTH) {
+                            break;
+                        }
+                        int magic = defaultMappedFile.getIntFromDataArea(curPos);
                         curPos += 4;
-                        int checksum = defaultMappedFile.getInt(curPos);
+                        if (magic != DataStruct.MAGIC_NUMBER) {
+                            break;
+                        }
+                        int checksum = defaultMappedFile.getIntFromDataArea(curPos);
                         curPos += 4;
-                        int valueLen = defaultMappedFile.getInt(curPos);
+                        int valueLen = defaultMappedFile.getIntFromDataArea(curPos);
                         curPos += 4;
-                        byte[] orgData = defaultMappedFile.getOrgData(curPos, valueLen);
+                        byte[] orgData = defaultMappedFile.getOrgDataFromDataArea(curPos, valueLen);
+                        curPos += (valueLen + 3) & ~3;
                         crc32.update(orgData);
                         if ((int) crc32.getValue() != checksum) {
                             //数据错误直接退出
@@ -291,13 +299,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     }
                     //尝试封口
                     blockMetaDataManager.trySeal(fileFromOffset, blockIndex);
+                    //将文件对应block位置设置为1
+                    defaultMappedFile.setBlockStateArrayFinishedPageCache(blockIndex);
                     //该block数据结束了，将该block上传
                     CloudCacheBlock block = recoverBlockManager.getExistingBlock(fileFromOffset, blockIndex);
                     recoverBlockManager.updateBlock(block);
                     curPos = upLoadPosition + ((long) i * oldblockSize);
                 }
-                //将该文件设置为清除
-                defaultMappedFile.upLoadPosition = readPosition;
+                //将文件关闭
                 defaultMappedFile.close();
             } catch (Exception e) {
                 log.warn("recovering=>{} file created failed", fileFromOffset, e);
@@ -318,37 +327,37 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
             for (BucketWriterWriter writer : writers) {
                 closeExecutor.execute(() -> {
-                try {
-                    // 1：先将所有的 bucket 设置为关闭中，不可写入
-                    writer.close();
-                    String bucketName = writer.getBucketName();
-                    CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
-                    MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
-                    // 2：限时等待该 writer 完成写入
-                    mappedFileManager.waitWriterFinished(writeDeadline);
-                    // 3：封口所有的 block
-                    BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
-                    blockMetaDataManager.trySealAllBlock();
-                    // 4：限时上传所有的 block
-                    long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
-                    cacheBlockManager.updateAllBlock(upLoadDeadline);
-                    //5：刷新读指针
-                    mappedFileManager.endFlushFileReadPosition();
-                    //此时要真正的关闭文件、block，并且不允许文件指针进行改动，这样保证了6 7步骤的指针状态是一致的
-                    mappedFileManager.closeAllFile();
-                    cacheBlockManager.closeAllBlock();
-                    // 6：强制刷新所有文件的元数据区域
-                    mappedFileManager.endMetaFlush();
-                    // 7：最后检查一遍文件，把能删除的文件删除
-                    mappedFileManager.endChackMappedFile();
-                    // 8：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
-                    if (mappedFileManager.mappedFileIsEmpty()) {
-                        MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
-                        BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
+                    try {
+                        // 1：先将所有的 bucket 设置为关闭中，不可写入
+                        writer.close();
+                        String bucketName = writer.getBucketName();
+                        CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
+                        MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
+                        // 2：限时等待该 writer 完成写入
+                        mappedFileManager.waitWriterFinished(writeDeadline);
+                        // 3：封口所有的 block
+                        BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
+                        blockMetaDataManager.trySealAllBlock();
+                        // 4：限时上传所有的 block
+                        long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
+                        cacheBlockManager.updateAllBlock(upLoadDeadline);
+                        //5：刷新读指针
+                        mappedFileManager.endFlushFileReadPosition();
+                        //此时要真正的关闭文件、block，并且不允许文件指针进行改动，这样保证了6 7步骤的指针状态是一致的
+                        mappedFileManager.closeAllFile();
+                        cacheBlockManager.closeAllBlock();
+                        // 6：强制刷新所有文件的元数据区域
+                        mappedFileManager.endMetaFlush();
+                        // 7：最后检查一遍文件，把能删除的文件删除
+                        mappedFileManager.endChackMappedFile();
+                        // 8：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
+                        if (mappedFileManager.mappedFileIsEmpty()) {
+                            MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
+                            BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
+                        }
+                    } catch (Throwable t) {
+                        log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
                     }
-                } catch (Throwable t) {
-                    log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
-                }
                 });
             }
         } //执行到这里时，Java 自动调用 closeExecutor.close()，主线程在此强行阻塞，直到所有虚拟线程全部执行完成
