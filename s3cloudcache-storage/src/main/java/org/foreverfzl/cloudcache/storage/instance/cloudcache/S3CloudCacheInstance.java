@@ -41,6 +41,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 import java.util.zip.CRC32;
 
@@ -71,6 +73,11 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     private final ConcurrentHashMap<String, BucketWriterWriter> bucketWriters = new ConcurrentHashMap<>();
 
     private final S3Client s3Client;
+
+    /**
+     * 全局数据恢复异步任务句柄
+     */
+    private volatile CompletableFuture<Void> recoveryFuture;
 
 
     public S3CloudCacheInstance(S3Client s3Client, S3CloudCacheConfig config) {
@@ -126,12 +133,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     public void start() {
         Path instancePath = Paths.get(config.walPath, instanceName);
         if (!Files.exists(instancePath)) {
+            this.recoveryFuture = CompletableFuture.completedFuture(null);
             return;
         }
         try (Stream<Path> list = Files.list(instancePath)) {
             List<Path> bucketPathList = list.toList();
             int bucketCount = bucketPathList.size();
             if (bucketCount == 0) {
+                this.recoveryFuture = CompletableFuture.completedFuture(null);
                 return;
             }
             int threadCount = Math.min(bucketCount, Runtime.getRuntime().availableProcessors() * 2);
@@ -146,15 +155,25 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     log.error("Recover preparation failed for path: {}", path, e);
                 }
             }
+            if (futures.isEmpty()) {
+                this.recoveryFuture = CompletableFuture.completedFuture(null);
+                recoverExecutorService.shutdown();
+                return;
+            }
             // 绑定异步终结回调：当所有子任务全部完成（无论成功或失败）后，自动关闭线程池
-            // start() 方法不会在此处阻塞
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+            // start() 方法不会在此处阻塞，并将全局句柄赋值给 recoveryFuture
+            this.recoveryFuture = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
                     .whenComplete((unused, throwable) -> {
-                        log.info("All buckets recovery completed, shutting down recoverExecutorService.");
+                        if (throwable != null) {
+                            log.error("Data recovery completed exceptionally.", throwable);
+                        } else {
+                            log.info("All buckets recovery completed, shutting down recoverExecutorService.");
+                        }
                         recoverExecutorService.shutdown();
                     });
         } catch (Exception e) {
             log.error("Start async recovery failed for instance: {}", instanceName, e);
+            this.recoveryFuture = CompletableFuture.completedFuture(null);
         }
     }
 
@@ -318,6 +337,19 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
 
     @Override
     public void close(long walWriteWaitTime, long upLoadWaitTime) {
+        // 0. 等待数据恢复任务完成，避免恢复未完成时执行封口和清理导致数据丢失
+        long recoverWaitTime = upLoadWaitTime + walWriteWaitTime;
+        if (this.recoveryFuture != null && !this.recoveryFuture.isDone()) {
+            log.info("Waiting for data recovery to complete before closing instance: {}", instanceName);
+            try {
+                this.recoveryFuture.get(recoverWaitTime, TimeUnit.MILLISECONDS);
+                log.info("Data recovery completed before closing instance: {}", instanceName);
+            } catch (TimeoutException e) {
+                log.warn("Data recovery did not finish within timeout ({} ms) before closing instance: {}", recoverWaitTime, instanceName, e);
+            } catch (Exception e) {
+                log.error("Data recovery encountered an error while waiting in close() for instance: {}", instanceName, e);
+            }
+        }
         long writeDeadline = System.currentTimeMillis() + walWriteWaitTime;
         Collection<BucketWriterWriter> writers = bucketWriters.values();
         // 1. 利用 try-with-resources 自动管理虚拟线程池的生命周期
