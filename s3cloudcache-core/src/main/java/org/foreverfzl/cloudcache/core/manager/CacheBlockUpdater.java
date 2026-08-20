@@ -80,7 +80,7 @@ public class CacheBlockUpdater {
             int logicalIndex = block.getLogicalIndex();
             boolean isSuccess = false;
             for (int i = 0; i < 3; i++) {
-//                isSuccess = executeUpload(block);
+                isSuccess = executeUpload(block);
                 if (isSuccess) {
                     manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
                     block.getDefaultMappedFile().ackUpLoadPosition(logicalIndex);

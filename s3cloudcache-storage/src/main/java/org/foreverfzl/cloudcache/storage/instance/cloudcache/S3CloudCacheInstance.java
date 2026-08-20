@@ -128,18 +128,15 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         if (!Files.exists(instancePath)) {
             return;
         }
-
         try (Stream<Path> list = Files.list(instancePath)) {
             List<Path> bucketPathList = list.toList();
             int bucketCount = bucketPathList.size();
             if (bucketCount == 0) {
                 return;
             }
-
             int threadCount = Math.min(bucketCount, Runtime.getRuntime().availableProcessors() * 2);
             ExecutorService recoverExecutorService = Executors.newFixedThreadPool(threadCount);
             List<CompletableFuture<Void>> futures = new ArrayList<>(bucketCount);
-
             for (Path path : bucketPathList) {
                 try {
                     String bucketName = path.getFileName().toString();
@@ -156,7 +153,6 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                         log.info("All buckets recovery completed, shutting down recoverExecutorService.");
                         recoverExecutorService.shutdown();
                     });
-
         } catch (Exception e) {
             log.error("Start async recovery failed for instance: {}", instanceName, e);
         }
@@ -190,7 +186,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         //看看新的BlockSize是否比原来的BlockSize小，如果小的话就不恢复以前的数据
         //因为我们采用的是最新配置的CacheBlock，如果老配置大于新配置需要多阶段提交上传，这里简单化
         if (bucketConfig.blockSize < oldblockSize) {
-            log.warn("The new block size is smaller than the old block size. file path is{}", path);
+            log.error("The new block size is smaller than the old block size.bucket recover stop. bucketMeta file path is{}", path);
             return;
         }
         /*
@@ -215,7 +211,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             //恢复wal目录下的数据
             futures.add(recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix, recoverExecutorService));
         } catch (Exception e) {
-
+            log.error("path={} recover failed", path, e);
         }
     }
 
@@ -228,12 +224,12 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 () -> doRecoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, prefix),
                 recoverExecutorService
         ).exceptionally(ex -> {
-            log.error("Async WAL recovery failed", ex);
             return null;
         });
     }
 
     private void doRecoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager, long oldFileSize, int oldblockSize, String prefix) {
+
         CRC32 crc32 = new CRC32();
         //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
         long curPos = 0;
@@ -241,8 +237,8 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         for (Path curPath : walFiles) {
             String fileName = curPath.getFileName().toString();
             long fileFromOffset = Long.parseLong(fileName);
-            File file = curPath.toFile();
             try {
+                File file = curPath.toFile();
                 //创建该文件的Java对象
                 DefaultMappedFile defaultMappedFile = new DefaultMappedFile(curPath.getParent().toString(), fileName, fileFromOffset, oldFileSize, file, oldblockSize, false, false, fileManager);
                 //获取该文件对应的元数据
@@ -298,9 +294,9 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                         crc32.reset();
                     }
                     //尝试封口
-                    blockMetaDataManager.trySeal(fileFromOffset, blockIndex);
+                    int state = blockMetaDataManager.trySeal(fileFromOffset, blockIndex);
                     //将文件对应block位置设置为1
-                    defaultMappedFile.setBlockStateArrayFinishedPageCache(blockIndex);
+                    if ((state & 1) == 1) defaultMappedFile.setBlockStateArrayFinishedPageCache(blockIndex);
                     //该block数据结束了，将该block上传
                     CloudCacheBlock block = recoverBlockManager.getExistingBlock(fileFromOffset, blockIndex);
                     recoverBlockManager.updateBlock(block);
@@ -309,7 +305,8 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 //将文件关闭
                 defaultMappedFile.close();
             } catch (Exception e) {
-                log.warn("recovering=>{} file created failed", fileFromOffset, e);
+                log.error("recovering=>{} file created failed", fileFromOffset, e);
+                throw e;
             }
         }
     }

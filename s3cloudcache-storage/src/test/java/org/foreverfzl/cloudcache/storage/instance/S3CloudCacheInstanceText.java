@@ -63,11 +63,10 @@ public class S3CloudCacheInstanceText {
 //                System.out.println(result.getSize());
 //            }
 //        }
-        Scanner scanner = new Scanner(System.in);
-        if (scanner.nextInt() == 1) {
-
-        }
-
+//        Scanner scanner = new Scanner(System.in);
+//        if (scanner.nextInt() == 1) {
+//
+//        }
 
 //        for (int i = 0; i < 2; i++) {
 //            System.out.println("输入数据");
@@ -78,10 +77,6 @@ public class S3CloudCacheInstanceText {
 //                System.out.println(result.getOffset());
 //                System.out.println(result.getSize());
 //            }
-//        }
-//        System.out.println("请输入数字");
-//        if (scanner.nextInt() == 1) {
-//
 //        }
         textInstance.close(15000, 15000);
     }
