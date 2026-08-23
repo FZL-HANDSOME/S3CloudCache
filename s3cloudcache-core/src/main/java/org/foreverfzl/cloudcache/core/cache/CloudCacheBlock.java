@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.core.cache;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
 import java.lang.foreign.MemorySegment;
@@ -22,6 +23,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
 
     //如果isClean为true那么最后一个线程会清除block并将block放回到空闲block池中
     private volatile boolean isClean = false;
+    private volatile boolean isBroken = false;
 
     //globalMemorySegment的一个切片
     protected final MemorySegment memorySegment;
@@ -86,13 +88,19 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         long refs = this.refCount.decrementAndGet();
         //最后一个线程看是否满足上传需求
         if (refs == 0) {
+            BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
             //如果需要clean则进行clean并放回到空闲池中
             if (isClean) {
-                clean();
-                manager.recycleBlock(this);
+                manager.cleanAndRecycle(this);
+                isClean = false;
+            }
+            if (isBroken) {
+                blockMetaDataManager.setMetaDataBroken(fileFromOffset, logicalIndex);
+                isBroken = false;
+                return;
             }
             //如果可以上传则上传
-            if (manager.blockMetaDataManager.canUpload(this.fileFromOffset, this.logicalIndex)) {
+            if (blockMetaDataManager.canUpload(this.fileFromOffset, this.logicalIndex)) {
                 manager.updateBlock(this);
             }
         }
@@ -159,6 +167,18 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.isClean = true;
     }
 
+    public void setBroken() {
+        this.isBroken = true;
+    }
+
+    public boolean isBroken() {
+        return isBroken;
+    }
+
+    public boolean isClean() {
+        return isClean;
+    }
+
     public void clean() {
         this.setActive();
         this.s3Key = null;
@@ -166,6 +186,5 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.defaultMappedFile = null;
         this.fileFromOffset = 0;
         this.logicalIndex = 0;
-        this.isClean = false;
     }
 }

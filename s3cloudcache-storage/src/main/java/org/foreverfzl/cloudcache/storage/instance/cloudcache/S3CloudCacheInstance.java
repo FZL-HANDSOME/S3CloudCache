@@ -248,7 +248,6 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
     private void doRecoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager, long oldFileSize, int oldblockSize, String prefix) {
-
         CRC32 crc32 = new CRC32();
         //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
         long curPos = 0;
@@ -336,7 +335,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
     @Override
-    public void close(long walWriteWaitTime, long upLoadWaitTime) {
+    public void close(long walWriteWaitTime, long blockWriteWaitTime, long upLoadWaitTime) {
         // 0. 等待数据恢复任务完成，避免恢复未完成时执行封口和清理导致数据丢失
         long recoverWaitTime = upLoadWaitTime + walWriteWaitTime;
         if (this.recoveryFuture != null && !this.recoveryFuture.isDone()) {
@@ -357,29 +356,50 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             for (BucketWriterWriter writer : writers) {
                 closeExecutor.execute(() -> {
                     try {
-                        // 1：先将所有的 bucket 设置为关闭中，不可写入
+                        // 1：先将所有的 bucket 设置为关闭中，此时在bucket层面拒绝新的数据写入
                         writer.close();
                         String bucketName = writer.getBucketName();
                         CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
                         MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
-                        // 2：限时等待该 writer 完成写入
+
+                        //2：停止所有的线程
+                        mappedFileManager.stopAllThread();
+                        cacheBlockManager.stopAllThread();
+
+                        //3：限时等待该 wal 完成写入
                         mappedFileManager.waitWriterFinished(writeDeadline);
-                        // 3：封口所有的 block
+
+                        //4：关闭所有的文件
+                        mappedFileManager.closeAllFile();
+
+                        //5：限时等待 blockManager的写入完成
+                        long blockWriteDeadline = System.currentTimeMillis() + blockWriteWaitTime;
+                        cacheBlockManager.waitWriterFinished(blockWriteDeadline);
+
+                        //6：关闭所有的block，禁止物理block的写入
+                        cacheBlockManager.closeAllBlock();
+
+                        //7：封口所有的 block
                         BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
                         blockMetaDataManager.trySealAllBlock();
-                        // 4：限时上传所有的 block
+
+                        //8：限时上传所有的 block
                         long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
                         cacheBlockManager.updateAllBlock(upLoadDeadline);
-                        //5：刷新读指针
+
+                        //9：刷新读指针
                         mappedFileManager.endFlushFileReadPosition();
-                        //此时要真正的关闭文件、block，并且不允许文件指针进行改动，这样保证了6 7步骤的指针状态是一致的
-                        mappedFileManager.closeAllFile();
-                        cacheBlockManager.closeAllBlock();
-                        // 6：强制刷新所有文件的元数据区域
+
+                        //10：禁止所有文件指针进行改动，这样保证了步骤11和12的指针状态是一致的
+                        mappedFileManager.stopUpdateAllFilePosition();
+
+                        //11：强制刷新所有文件的元数据区域
                         mappedFileManager.endMetaFlush();
-                        // 7：最后检查一遍文件，把能删除的文件删除
+
+                        //12：最后检查一遍文件，把能删除的文件删除
                         mappedFileManager.endChackMappedFile();
-                        // 8：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
+
+                        //13：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
                         if (mappedFileManager.mappedFileIsEmpty()) {
                             MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
                             BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);

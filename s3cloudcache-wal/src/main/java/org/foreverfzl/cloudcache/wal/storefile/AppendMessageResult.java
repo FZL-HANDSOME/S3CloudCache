@@ -61,7 +61,6 @@ public class AppendMessageResult {
          * 文件剩余空间不足，已写满
          */
         END_OF_FILE,
-        BLOCK_SEALED,
         /**
          * 参数异常（如 walDataStruct 为空）
          */

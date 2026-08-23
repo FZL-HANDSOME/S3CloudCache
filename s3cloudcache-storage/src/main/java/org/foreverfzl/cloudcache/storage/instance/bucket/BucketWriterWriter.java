@@ -68,11 +68,11 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
             long fileFromOffset = result.getFileFromOffset();
             int logicalIndex = result.getLogicalIndex();
-            //如果出现其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
+            //如果出现除了END_OF_FILE、FILE_CLOSED其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
             if (!result.isOk()) {
                 log.warn("WAL数据添加失败，result==>{}", result);
-                //将对应的物理block标记为删除
-                String s3Key = cacheBlockManager.deleteBlock(fileFromOffset, logicalIndex);
+                //将对应的物理block标记为删除，这里只能标记为删除，不能立刻删除，因为可能其它线程正往block中写入
+                String s3Key = cacheBlockManager.markBlockClean(fileFromOffset, logicalIndex);
                 //将对应的元数据删除
                 blockMetaDataManager.deleteBlockMetaData(fileFromOffset, logicalIndex);
                 return new WriteResult(s3Key, -1, -1, false);
@@ -129,41 +129,67 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private void getBlockBroken() {
         while (active) {
+            long fileFromOffset = -1;
+            int blockIndex = -1;
+            BlockMetaData blockMetaData = null;
             try {
                 //获取任务
                 RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
-                long fileFromOffset = task.getFileFromOffset();
-                int blockIndex = task.getBlockIndex();
-                log.info("fileFromOffset=>{}, blockIndex=>{} is Consumed from recoverQueue", fileFromOffset, blockIndex);
+                fileFromOffset = task.getFileFromOffset();
+                blockIndex = task.getBlockIndex();
                 //先看看对应的block是否真正全部写入到PageCache或者落盘
-                BlockMetaData blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
+                blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
                 if (blockMetaData == null) {
                     continue;
                 }
-                if (blockMetaData.getState() != 1 && blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
-                    //重新放回
-                    blockMetaDataManager.setTaskToRecoverQueue(task);
-                    Thread.sleep(100);
+                if (blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
+                    //由于对应的wal数据还没写完，该block不能进行数据恢复，重新放回
+                    if (task.getTimes() == 3) {
+                        log.warn("fileFromOffset= {} blockIndex= {} can not recover", fileFromOffset, blockIndex);
+                    } else {
+                        task.incrementTimes();
+                        blockMetaDataManager.setTaskToRecoverQueue(task);
+                    }
+                    Thread.sleep(1000);
                     continue;
                 }
-                DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
-                if (mappedFile == null) {
-                    continue;
-                }
+            } catch (InterruptedException interruptedException) {
+                active = false;
+                Thread.currentThread().interrupt();
+                break;
+            }
+            if (fileFromOffset == -1 || blockIndex == -1) {
+                continue;
+            }
+            DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
+            if (mappedFile == null) {
+                continue;
+            }
+            //到这里该block的状态为：broken为true并且封口，并且block数据全部写入到了PageCache
+            mappedFile.hold();
+            blockMetaData.setUnBroken();
+            try {
                 int blockSize = mappedFile.getBlockSize();
                 long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);
-                long pos = fileFromOffset + ((long) blockIndex * blockSize);
+                long curPos = fileFromOffset + ((long) blockIndex * blockSize);
                 CRC32 crc = new CRC32();
                 //如果可以读int并且是正常数据则读取
                 //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
-                while (endPos - pos >= 4 && mappedFile.getIntFromDataArea(pos) == DataStruct.MAGIC_NUMBER) {
-                    pos += 4;
-                    int chackSum = mappedFile.getIntFromDataArea(pos);
-                    pos += 4;
-                    int dataLen = mappedFile.getIntFromDataArea(pos);
-                    pos += 4;
-                    byte[] orgData = mappedFile.getOrgDataFromDataArea(pos, dataLen);
-                    pos += dataLen;
+                while (true) {
+                    if (endPos - curPos <= DataStruct.HEADER_LENGTH) {
+                        break;
+                    }
+                    int magic = mappedFile.getIntFromDataArea(curPos);
+                    curPos += 4;
+                    if (magic != DataStruct.MAGIC_NUMBER) {
+                        break;
+                    }
+                    int chackSum = mappedFile.getIntFromDataArea(curPos);
+                    curPos += 4;
+                    int dataLen = mappedFile.getIntFromDataArea(curPos);
+                    curPos += 4;
+                    byte[] orgData = mappedFile.getOrgDataFromDataArea(curPos, dataLen);
+                    curPos += (dataLen + 3) & ~3;
                     crc.update(orgData);
                     int cs = (int) crc.getValue();
                     if (cs != chackSum) {
@@ -171,15 +197,13 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen));
+                    cacheBlockManager.appendDataText(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen));
                     crc.reset();
                 }
-            } catch (InterruptedException interruptedException) {
-                active = false;
-                Thread.currentThread().interrupt();
-                break;
             } catch (Exception e) {
                 log.warn("getBlockBrokenTask failed=>", e);
+            } finally {
+                mappedFile.release();
             }
         }
     }

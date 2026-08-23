@@ -310,7 +310,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
         }
         if (dataStruct == null) {
-            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.FILE_CLOSED, this.fileFromOffset);
+            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.INVALID_ARGUMENT, this.fileFromOffset);
         }
         long msgSize = dataStruct.getSerializedSize();
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
@@ -394,8 +394,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             }
         } finally {
             int release = this.release();
-            if (release == 0 && blockMetaData != null && logicalIndex != -1
-                    && blockMetaDataManager.isAllDataWriteInPageCache(blockMetaData)) {
+            if (release == 0 && blockMetaData != null && logicalIndex != -1 && blockMetaDataManager.isAllDataWriteInPageCache(blockMetaData)) {
                 //最后一个线程去检查全部数据是否全部写入到PageCache中
                 setBlockStateArrayFinishedPageCache(logicalIndex);
             }

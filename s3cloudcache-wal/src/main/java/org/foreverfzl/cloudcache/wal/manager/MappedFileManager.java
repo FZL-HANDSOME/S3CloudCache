@@ -7,6 +7,7 @@ import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudcache.wal.storefile.MappedFiledReferenceResource;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
 import org.slf4j.Logger;
@@ -127,7 +128,7 @@ public class MappedFileManager {
                 if (status == AppendMessageResult.AppendStatus.PUT_OK) {
                     break;
                 }
-                if (status != AppendMessageResult.AppendStatus.END_OF_FILE & status != AppendMessageResult.AppendStatus.FILE_CLOSED) {
+                if (status != AppendMessageResult.AppendStatus.END_OF_FILE && status != AppendMessageResult.AppendStatus.FILE_CLOSED) {
                     //除了OK、END、CLOSE其它都直接返回
                     break;
                 }
@@ -336,27 +337,27 @@ public class MappedFileManager {
 
     //只有项目关闭时才会调用
     public void closeAllFile() {
+        //关闭文件
+        mappedFiles.values().forEach((MappedFiledReferenceResource::close));
+    }
+
+    public void stopUpdateAllFilePosition() {
         mappedFiles.values().forEach((defaultMappedFile -> {
-            //关闭文件
-            defaultMappedFile.close();
-            //禁止指针的更新
             defaultMappedFile.posActive = false;
         }));
     }
 
+
     //让线程执行最后一次
     public void endFlushFileReadPosition() {
-        flushFileReadPositionThread.interrupt();
         flushReadPositionTaskExtracted();
     }
 
     public void endMetaFlush() {
-        fileMetaFlushThread.interrupt();
         flushFileMetaExtracted();
     }
 
     public void endChackMappedFile() {
-        chackMappedFileThread.interrupt();
         chackMappedFileTaskExtracted();
     }
 
@@ -439,10 +440,16 @@ public class MappedFileManager {
                     log.warn("{} close timeout, force shutdown", bucketName);
                     return;
                 }
-                Thread.sleep(20);
+                Thread.sleep(500);
             } catch (Exception e) {
             }
         }
+    }
+
+    public void stopAllThread(){
+        chackMappedFileThread.interrupt();
+        fileMetaFlushThread.interrupt();
+        flushFileReadPositionThread.interrupt();
     }
 
     public boolean mappedFileIsEmpty() {

@@ -138,4 +138,8 @@ public class BlockMetaData {
     public void setBroken() {
         isBroken = true;
     }
+
+    public void setUnBroken() {
+        isBroken = false;
+    }
 }

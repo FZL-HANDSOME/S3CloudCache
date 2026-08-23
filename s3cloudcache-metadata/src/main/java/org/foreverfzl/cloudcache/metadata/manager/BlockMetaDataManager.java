@@ -59,7 +59,9 @@ public class BlockMetaDataManager {
     }
 
     public RecoverTask getTaskFromRecoverQueue() throws InterruptedException {
-        return blockRecoverQueue.take();
+        RecoverTask take = blockRecoverQueue.take();
+        log.info("fileFromOffset=>{}, blockIndex=>{} is Consumed from recoverQueue", take.getFileFromOffset(), take.getBlockIndex());
+        return take;
     }
 
     public void setTaskToRecoverQueue(RecoverTask recoverTask) {
@@ -158,15 +160,20 @@ public class BlockMetaDataManager {
         if (blockMetaData.getState() == BlockMetaData.SEALED) {
             return 0;
         }
-        boolean trySeal = false;
+        int ans = 0;
         synchronized (blockMetaData) {
             if (blockMetaData.getState() == BlockMetaData.SEALED) {
                 return 0;
             }
             //seal和broken状态存在竞争关系
-            trySeal = blockMetaData.trySeal();
+            blockMetaData.trySeal();
+            //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
+            if (blockMetaData.isBroken()) {
+                blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+                //如果破损了则将2位置设置为1
+                ans = ans | (1 << 2);
+            }
         }
-        int ans = 0;
         if (blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
             //然后将文件中的数组位置改为1，代表可以更新read指针
             //如果该条件命中，则0位置设置为1
@@ -178,12 +185,6 @@ public class BlockMetaDataManager {
             //如果上传了则将1位置设置为1
             ans = ans | (1 << 1);
         }
-        //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
-        if (trySeal && blockMetaData.isBroken()) {
-            blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
-            //如果破损了则将2位置设置为1
-            ans = ans | (1 << 2);
-        }
         return ans;
     }
 
@@ -193,15 +194,19 @@ public class BlockMetaDataManager {
         if (blockMetaData == null) {
             return;
         }
+        if (blockMetaData.isBroken()) {
+            return;
+        }
         synchronized (blockMetaData) {
             if (blockMetaData.isBroken()) {
                 return;
             }
             blockMetaData.setBroken();
+            if (blockMetaData.getState() == BlockMetaData.SEALED) {
+                blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+            }
         }
-        if (blockMetaData.getState() == BlockMetaData.SEALED) {
-            blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
-        }
+
     }
 
 
