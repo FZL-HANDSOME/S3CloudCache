@@ -1,6 +1,7 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
+import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
@@ -61,6 +62,8 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     }
 
 
+    //咱们的项目修改为只要数据成功写入到wal文件中WriteResult就为true，
+    // 如果一个S3key的WriteResult有一个为false则代表与该S3key相关的数据全部上传失败(让用户自己操作)。
     @Override
     public WriteResult write(byte[] data) {
         WriteResult writeResult = null;
@@ -71,23 +74,21 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             //如果出现除了END_OF_FILE、FILE_CLOSED其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
             if (!result.isOk()) {
                 log.warn("WAL数据添加失败，result==>{}", result);
-                //将对应的物理block标记为删除，这里只能标记为删除，不能立刻删除，因为可能其它线程正往block中写入
-                String s3Key = cacheBlockManager.markBlockClean(fileFromOffset, logicalIndex);
-                //将对应的元数据删除
-                blockMetaDataManager.deleteBlockMetaData(fileFromOffset, logicalIndex);
-                return new WriteResult(s3Key, -1, -1, false);
+                //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
+                //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
+                CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
+                //将CloudCacheBlock标记为unActive并且标记为延迟删除
+                cacheBlock.getReference();
+                cacheBlock.setUnActive();
+                cacheBlock.setDelayClean();
+                cacheBlock.releaseReference();
+                //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
+                return new WriteResult(cacheBlock.getS3Key(), -1, -1, false);
             }
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
                     , data, 0, data.length);
             AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
-            if (!blockResult.result()) {
-                log.warn("Block数据添加失败，blockResult==>{}", blockResult);
-            }
-            if (!blockResult.result()) {
-                writeResult = new WriteResult(blockResult.s3Key(), -1, -1, false);
-            } else {
-                writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
-            }
+            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
         }
@@ -132,24 +133,40 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             long fileFromOffset = -1;
             int blockIndex = -1;
             BlockMetaData blockMetaData = null;
+            RecoverTask task = null;
+            CloudCacheBlock cacheBlock = null;
             try {
                 //获取任务
-                RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
+                task = blockMetaDataManager.getTaskFromRecoverQueue();
+                if (task.getTimes() == 5) {
+                    //如果重新放回超过5次则不进行数据恢复
+                    log.warn("fileFromOffset= {} blockIndex= {} can not recover,because put back over 5 times", fileFromOffset, blockIndex);
+                    continue;
+                }
                 fileFromOffset = task.getFileFromOffset();
                 blockIndex = task.getBlockIndex();
                 //先看看对应的block是否真正全部写入到PageCache或者落盘
                 blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
                 if (blockMetaData == null) {
+                    log.warn("fileFromOffset= {} blockIndex= {} can not recover,because blockMetaData is null", fileFromOffset, blockIndex);
                     continue;
                 }
+                //先检查所有数据是否全部写入到PageCache中
                 if (blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
                     //由于对应的wal数据还没写完，该block不能进行数据恢复，重新放回
-                    if (task.getTimes() == 3) {
-                        log.warn("fileFromOffset= {} blockIndex= {} can not recover", fileFromOffset, blockIndex);
-                    } else {
-                        task.incrementTimes();
-                        blockMetaDataManager.setTaskToRecoverQueue(task);
-                    }
+                    task.incrementTimes();
+                    blockMetaDataManager.setTaskToRecoverQueue(task);
+                    Thread.sleep(1000);
+                    continue;
+                }
+                //物理block写入失败后该CloudCacheBlock会存放在cacheBlockManager的keyBlockMap
+                //然后检查此时该CacheBlock是否有其它线程写入或者上传
+                cacheBlock = cacheBlockManager.getExistingBlock(fileFromOffset, blockIndex);
+                int referenceCount = cacheBlock.getReferenceCount();
+                if (referenceCount != 0) {
+                    //说明有其它线程正在写入并且上传，将恢复任务重新放入到队列中
+                    task.incrementTimes();
+                    blockMetaDataManager.setTaskToRecoverQueue(task);
                     Thread.sleep(1000);
                     continue;
                 }
@@ -158,16 +175,16 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 Thread.currentThread().interrupt();
                 break;
             }
-            if (fileFromOffset == -1 || blockIndex == -1) {
-                continue;
-            }
             DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
             if (mappedFile == null) {
                 continue;
             }
-            //到这里该block的状态为：broken为true并且封口，并且block数据全部写入到了PageCache
-            mappedFile.hold();
+            //到这里该block的状态为：broken为true并且封口，并且block数据全部写入到了PageCache，并且此时没有其它线程引用该block
+            //在此我们需要将isBroken设置为flase，active设置为true，并且将该CacheBlock的指针设置为0
+            cacheBlock.resetWritePosition();
+            cacheBlock.setActive();
             blockMetaData.setUnBroken();
+            mappedFile.hold();
             try {
                 int blockSize = mappedFile.getBlockSize();
                 long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);

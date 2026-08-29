@@ -138,18 +138,16 @@ public class CacheBlockManager {
             log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
             return AppendDataResult.fail(fileFromOffset, blockIndex);
         }
-        //如果此时Block不能写入，则直接返回
         if (!cacheBlock.isActive()) {
             return AppendDataResult.fail(fileFromOffset, blockIndex);
         }
         cacheBlock.getReference();
         boolean isError = false;
+        writeCount.incrementAndGet();
         try {
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
-            //将数据写入Block
-            //如果此时Block不能写入，则直接返回
             if (!cacheBlock.isActive()) {
                 return AppendDataResult.fail(fileFromOffset, blockIndex);
             }
@@ -166,12 +164,16 @@ public class CacheBlockManager {
         } catch (Exception e) {
             log.error("{} block write failed", cacheBlock.getS3Key(), e);
             isError = true;
+            //写入失败或者抛出异常，我们在finally中将block标记为broken并且标记为clean
             return AppendDataResult.fail(fileFromOffset, blockIndex);
         } finally {
-            if (isError) cacheBlock.setClean();
-            //将block标记为broken
-            if (isError) cacheBlock.setBroken();
+            if (isError) {
+                cacheBlock.setUnActive();
+                cacheBlock.setBroken();
+            }
+            //写完后释放引用
             cacheBlock.releaseReference();
+            writeCount.decrementAndGet();
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
                 cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
@@ -210,10 +212,10 @@ public class CacheBlockManager {
             //每个线程抢到自己的写指针
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
-//            //将数据写入Block
-//            if (count == 1) {
-//                throw new CoreException("failed to write data in block");
-//            }
+            //将数据写入Block
+            if (count == 1) {
+                throw new CoreException("failed to write data in block");
+            }
             if (!cacheBlock.isActive()) {
                 return AppendDataResult.fail(fileFromOffset, blockIndex);
             }
@@ -235,7 +237,6 @@ public class CacheBlockManager {
         } finally {
             if (isError) {
                 cacheBlock.setUnActive();
-                cacheBlock.setClean();
                 cacheBlock.setBroken();
             }
             //写完后释放引用
@@ -245,25 +246,6 @@ public class CacheBlockManager {
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
                 cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
-    }
-
-    /**
-     * 当wal文件对应的block写入数据失败(例如 数据错误、或者wirte写入错误)bucketWriter会调用该方法
-     */
-    public String markBlockClean(long fileFromOffset, int blockIndex) {
-        long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
-        CloudCacheBlock deleteBlock = keyBlockMap.get(cacheBlockKey);
-        if (deleteBlock == null) {
-            return null;
-        }
-        //这里拿到引用的目的就是为了能稳定触发clean
-        deleteBlock.getReference();
-        //设置为不可以写
-        deleteBlock.setUnActive();
-        //将block标记为删除
-        deleteBlock.setClean();
-        deleteBlock.releaseReference();
-        return deleteBlock.getS3Key();
     }
 
 
@@ -278,7 +260,6 @@ public class CacheBlockManager {
     /**
      * 关闭所有block的写入
      */
-
     public void closeAllBlock() {
         freeBlocks.forEach(CacheBlockReferenceResource::setUnActive);
         keyBlockMap.forEach((key, block) -> block.setUnActive());
@@ -290,7 +271,7 @@ public class CacheBlockManager {
     public void updateAllBlock(long deadLine) {
         for (Map.Entry<Long, CloudCacheBlock> entry : keyBlockMap.entrySet()) {
             CloudCacheBlock block = entry.getValue();
-            if(block.isBroken()){
+            if (block.isBroken()) {
                 continue;
             }
             updateBlock(block);
@@ -308,9 +289,6 @@ public class CacheBlockManager {
         }
     }
 
-    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
-        return this.getBlock(fileFromOffset, blockIndex, config.s3KeyPrefix, null);
-    }
 
     /**
      * 获取一个可用并且干净的 CloudCacheBlock，并将其与指定的 cacheBlockKey 绑定。
@@ -341,6 +319,30 @@ public class CacheBlockManager {
     }
 
 
+    public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
+        long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
+        // 检查是否已经存在与 cacheBlockKey 绑定的 block
+        CloudCacheBlock existingBlock = keyBlockMap.get(cacheBlockKey);
+        if (existingBlock != null) {
+            return existingBlock;
+        }
+        synchronized (getLock(cacheBlockKey)) {
+            // 双重检查
+            existingBlock = keyBlockMap.get(cacheBlockKey);
+            if (existingBlock != null) {
+                return existingBlock;
+            }
+            // 否则获取一个干净的 block
+            CloudCacheBlock block = freeBlocks.take();
+            block.setS3Key(ProjectUtil.generateUniqueS3Key(config.s3KeyPrefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
+            block.setFileFromOffset(fileFromOffset);
+            block.setLogicalIndex(blockIndex);
+            keyBlockMap.put(cacheBlockKey, block);
+            return block;
+        }
+    }
+
+
     public CloudCacheBlock getExistingBlock(long fileFromOffset, int blockIndex) {
         return keyBlockMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
     }
@@ -362,7 +364,31 @@ public class CacheBlockManager {
             // 重新放入空闲池中
             freeBlocks.put(block);
         } catch (InterruptedException e) {
-            log.warn("{}block was interrupted during put", block);
+            log.warn("{}block was interrupted during put in cleanAndRecycle method", block);
+        }
+    }
+
+    public void cleanAndRecycleWithLock(CloudCacheBlock block) {
+        if (block == null) {
+            return;
+        }
+        if (!block.isDelayClean()) {
+            return;
+        }
+        try {
+            // 从 K-V 映射中移除
+            long key = ProjectUtil.buildBlockKey(block.getFileFromOffset(), block.getLogicalIndex());
+            synchronized (getLock(key)) {
+                if (!block.isDelayClean()) {
+                    return;
+                }
+                keyBlockMap.remove(key);
+                block.clean();
+                // 重新放入空闲池中
+                freeBlocks.put(block);
+            }
+        } catch (InterruptedException e) {
+            log.warn("{}block was interrupted during put in cleanAndRecycleWithLock method", block);
         }
     }
 
@@ -385,7 +411,7 @@ public class CacheBlockManager {
         }
     }
 
-    public void stopAllThread(){
+    public void stopAllThread() {
         getBlockUpLoadQueueTaskThread.interrupt();
     }
 

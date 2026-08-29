@@ -21,8 +21,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
     private volatile long writePosition; //写指针
 
-    //如果isClean为true那么最后一个线程会清除block并将block放回到空闲block池中
-    private volatile boolean isClean = false;
     private volatile boolean isBroken = false;
 
     //globalMemorySegment的一个切片
@@ -89,14 +87,11 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         //最后一个线程看是否满足上传需求
         if (refs == 0) {
             BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
-            //如果需要clean则进行clean并放回到空闲池中
-            if (isClean) {
-                manager.cleanAndRecycle(this);
-                isClean = false;
+            if(isDelayClean()){
+                manager.cleanAndRecycleWithLock(this);
             }
             if (isBroken) {
                 blockMetaDataManager.setMetaDataBroken(fileFromOffset, logicalIndex);
-                isBroken = false;
                 return;
             }
             //如果可以上传则上传
@@ -106,9 +101,27 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         }
     }
 
+
+    public void clean() {
+        setUnDelayClean();
+        this.s3Key = null;
+        this.writePosition = 0;
+        this.defaultMappedFile = null;
+        this.fileFromOffset = 0;
+        this.logicalIndex = 0;
+    }
+
+    public void resetWritePosition() {
+        writePosition = 0;
+    }
+
     @Override
     public void getReference() {
         this.refCount.incrementAndGet();
+    }
+
+    public int getReferenceCount(){
+        return refCount.get();
     }
 
     public String getS3Key() {
@@ -163,9 +176,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         return manager;
     }
 
-    public void setClean() {
-        this.isClean = true;
-    }
 
     public void setBroken() {
         this.isBroken = true;
@@ -175,16 +185,4 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         return isBroken;
     }
 
-    public boolean isClean() {
-        return isClean;
-    }
-
-    public void clean() {
-        this.setActive();
-        this.s3Key = null;
-        this.writePosition = 0;
-        this.defaultMappedFile = null;
-        this.fileFromOffset = 0;
-        this.logicalIndex = 0;
-    }
 }

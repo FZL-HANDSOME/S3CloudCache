@@ -84,8 +84,8 @@ public class CacheBlockUpdater {
                 if (isSuccess) {
                     manager.blockMetaDataManager.markUploadSuccess(fileFromOffset, logicalIndex);
                     block.getDefaultMappedFile().ackUpLoadPosition(logicalIndex);
-                    //将block标记为清除回收
-                    block.setClean();
+                    //将block清除回收
+                    manager.cleanAndRecycle(block);
                     break;
                 }
                 Thread.sleep(1000);
@@ -148,8 +148,8 @@ public class CacheBlockUpdater {
         CacheBlockManager cacheBlockManager = block.getManager();
         DeadDataInfo deadDataInfo = new DeadDataInfo(cacheBlockManager.instanceName, cacheBlockManager.bucketName,
                 block.getFileFromOffset(), block.getLogicalIndex(), block.getS3Key());
-        //将block标记为清除回收
-        block.setClean();
+        //将block清除回收
+        manager.cleanAndRecycle(block);
         manager.blockMetaDataManager.markUploadFailed(block.getFileFromOffset(), block.getLogicalIndex(), deadDataInfo);
     }
 
