@@ -155,7 +155,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 if (blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
                     //由于对应的wal数据还没写完，该block不能进行数据恢复，重新放回
                     task.incrementTimes();
-                    blockMetaDataManager.setTaskToRecoverQueue(task);
+                    blockMetaDataManager.reSetTaskToRecoverQueue(task);
                     Thread.sleep(1000);
                     continue;
                 }
@@ -166,7 +166,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 if (referenceCount != 0) {
                     //说明有其它线程正在写入并且上传，将恢复任务重新放入到队列中
                     task.incrementTimes();
-                    blockMetaDataManager.setTaskToRecoverQueue(task);
+                    blockMetaDataManager.reSetTaskToRecoverQueue(task);
                     Thread.sleep(1000);
                     continue;
                 }
@@ -183,7 +183,6 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             //在此我们需要将isBroken设置为flase，active设置为true，并且将该CacheBlock的指针设置为0
             cacheBlock.resetWritePosition();
             cacheBlock.setActive();
-            blockMetaData.setUnBroken();
             mappedFile.hold();
             try {
                 int blockSize = mappedFile.getBlockSize();

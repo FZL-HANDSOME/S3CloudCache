@@ -354,7 +354,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     Thread.onSpinWait();
                     continue;
                 }
-                //检查该block是否已经封口
+                //检查该block是否已经封口，或者对应的Block已经Broken了
                 if (blockMetaDataManager.isSealed(this.fileFromOffset, logicalIndex)) {
                     //封口了则尝试将指针设置为下一个Block起点
                     paddingPos = currentPos + remainingInBlock;

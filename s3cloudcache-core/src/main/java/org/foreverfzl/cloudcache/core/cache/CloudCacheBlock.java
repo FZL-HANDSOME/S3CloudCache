@@ -1,10 +1,12 @@
 package org.foreverfzl.cloudcache.core.cache;
 
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
 import java.lang.foreign.MemorySegment;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**
@@ -21,8 +23,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     protected static final AtomicLongFieldUpdater<CloudCacheBlock> WROTE_POSITION_UPDATER;
     private volatile long writePosition; //写指针
 
-    private volatile boolean isBroken = false;
-
     //globalMemorySegment的一个切片
     protected final MemorySegment memorySegment;
     private final CacheBlockManager manager;
@@ -31,6 +31,8 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
     private DefaultMappedFile defaultMappedFile;
     private long fileFromOffset;
     private int logicalIndex;  // 它在这个 WAL 文件内部的逻辑序号（0, 1, 2...）
+    //对应的元数据对象
+    private BlockMetaData blockMetaData;
 
 
     static {
@@ -87,15 +89,15 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         //最后一个线程看是否满足上传需求
         if (refs == 0) {
             BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
-            if(isDelayClean()){
+            if (isDelayClean()) {
                 manager.cleanAndRecycleWithLock(this);
             }
-            if (isBroken) {
-                blockMetaDataManager.setMetaDataBroken(fileFromOffset, logicalIndex);
-                return;
+            if (blockMetaData.isBroken() && !blockMetaData.isBrokenSubmit()) {
+                // bit0=1，bit1=0
+                blockMetaDataManager.setTaskToRecoverQueue(blockMetaData, fileFromOffset, logicalIndex);
             }
             //如果可以上传则上传
-            if (blockMetaDataManager.canUpload(this.fileFromOffset, this.logicalIndex)) {
+            if (blockMetaData.canUpload()) {
                 manager.updateBlock(this);
             }
         }
@@ -120,7 +122,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         this.refCount.incrementAndGet();
     }
 
-    public int getReferenceCount(){
+    public int getReferenceCount() {
         return refCount.get();
     }
 
@@ -176,13 +178,18 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         return manager;
     }
 
+    public void setBlockMetaData(BlockMetaData blockMetaData) {
+        this.blockMetaData = blockMetaData;
+    }
 
     public void setBroken() {
-        this.isBroken = true;
+        blockMetaData.setBroken();
     }
 
     public boolean isBroken() {
-        return isBroken;
+        int isBroken = blockMetaData.getIsBroken();
+        return (isBroken & 1) == 1;
     }
+
 
 }

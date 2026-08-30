@@ -31,8 +31,7 @@ public class BlockMetaDataManager {
     }
 
     //该方法返回true则代表成功的将最后一个长时间不写block封口
-    public int chackLastActiveTime(long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
-        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
+    public int chackLastActiveTime(BlockMetaData blockMetaData, long fileFromOffset, int blockIndex, long curTime, long maxFreeTime) {
         if (blockMetaData == null) {
             return 0;
         }
@@ -47,7 +46,7 @@ public class BlockMetaDataManager {
             return 0;
         }
         //满足时间差封口，上传
-        return trySeal(fileFromOffset, blockIndex);
+        return trySeal(fileFromOffset, blockIndex, blockMetaData);
     }
 
     public DeadDataInfo getDeadDataInfo() throws InterruptedException {
@@ -64,8 +63,13 @@ public class BlockMetaDataManager {
         return take;
     }
 
-    public void setTaskToRecoverQueue(RecoverTask recoverTask) {
+
+    public void reSetTaskToRecoverQueue(RecoverTask recoverTask) {
         blockRecoverQueue.submit(recoverTask);
+    }
+
+    public void setTaskToUpdateQueue(long fileFromOffset, int blockIndex) {
+        blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
     }
 
     public void deleteBlockMetaData(long fileFromOffset, int blockIndex) {
@@ -153,9 +157,13 @@ public class BlockMetaDataManager {
      * 返回1代表需要将文件中的数组对应位置设置为1
      */
     public int trySeal(long fileFromOffset, int blockIndex) {
-        BlockMetaData blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
+        return trySeal(fileFromOffset, blockIndex, null);
+    }
+
+
+    public int trySeal(long fileFromOffset, int blockIndex, BlockMetaData blockMetaData) {
         if (blockMetaData == null) {
-            return 0;
+            blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         }
         if (blockMetaData.getState() == BlockMetaData.SEALED) {
             return 0;
@@ -168,8 +176,7 @@ public class BlockMetaDataManager {
             //seal和broken状态存在竞争关系
             blockMetaData.trySeal();
             //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
-            if (blockMetaData.isBroken()) {
-                blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+            if (blockMetaData.isBroken() && !blockMetaData.isBrokenSubmit()) {
                 //如果破损了则将2位置设置为1
                 ans = ans | (1 << 2);
             }
@@ -181,32 +188,27 @@ public class BlockMetaDataManager {
         }
         //检查一下block是否可以上传
         if (canUpload(fileFromOffset, blockIndex)) {
-            blockUpLoadQueue.submit(new UploadTask(fileFromOffset, blockIndex));
             //如果上传了则将1位置设置为1
             ans = ans | (1 << 1);
         }
         return ans;
     }
 
+
     //将对应的元数据设置为Broke
-    public void setMetaDataBroken(long fileFromOffset, int blockIndex) {
-        BlockMetaData blockMetaData = metaDataMap.get(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
-        if (blockMetaData == null) {
-            return;
-        }
-        if (blockMetaData.isBroken()) {
-            return;
-        }
+    public void setTaskToRecoverQueue(final BlockMetaData blockMetaData, long fileFromOffset, int blockIndex) {
         synchronized (blockMetaData) {
-            if (blockMetaData.isBroken()) {
+            if (blockMetaData.getState() != BlockMetaData.SEALED) {
                 return;
             }
-            blockMetaData.setBroken();
-            if (blockMetaData.getState() == BlockMetaData.SEALED) {
-                blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+            int isBroken = blockMetaData.getIsBroken();
+            if ((isBroken & (1 << 1)) == (1 << 1)) {
+                return;
             }
+            //将恢复任务放入到队列中，并将对应位置标记为已经提交，幂等性控制
+            blockRecoverQueue.submit(new RecoverTask(fileFromOffset, blockIndex));
+            blockMetaData.setBrokenSubmit();
         }
-
     }
 
 
@@ -257,19 +259,14 @@ public class BlockMetaDataManager {
     }
 
     /**
-     * 是否已经封口
+     * 看看是否已经封口，或者对应的物理Block broken了
      */
     public boolean isSealed(long fileFromOffset, int blockIndex) {
         BlockMetaData metaData = getBlockMetaData(fileFromOffset, blockIndex);
         if (metaData == null) return false;
-        int state = metaData.getState();
-        return state != 0;
+        return metaData.getState() != 0;
     }
 
-    public boolean isSealed(Long key) {
-        BlockMetaData metaData = metaDataMap.get(key);
-        return metaData != null && metaData.getState() == 1;
-    }
 
     /**
      * 是否已经全部写入完成，可以上传
@@ -279,7 +276,7 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1 && !metaData.isBroken() && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
+        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
                 && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
     }
 

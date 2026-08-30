@@ -272,7 +272,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                 //将该文件添加到manage中
                 fileManager.addMappedFile(defaultMappedFile);
                 //不需要恢复数据，将文件关闭，让后台线程自己检测删除
-                if (readPosition == upLoadPosition) {
+                if (readPosition <= upLoadPosition) {
                     defaultMappedFile.close();
                     continue;
                 }

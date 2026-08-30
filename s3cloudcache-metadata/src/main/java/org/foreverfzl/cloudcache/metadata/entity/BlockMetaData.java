@@ -34,8 +34,11 @@ public class BlockMetaData {
     private volatile int finishedBytes;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile long lastActiveTime;
-    //该Broken指的是 物理Block，如果写入数据出错则为true
-    private volatile boolean isBroken;
+
+    //该isBroken指的是物理block
+    protected static final AtomicIntegerFieldUpdater<BlockMetaData> IS_BROKEN_UPDATER;
+    //二进制：第0位为 1则代表broken，第1位为1则代表已经将任务上传到队列中了
+    private volatile int isBroken = 0;
 
 
     static {
@@ -43,6 +46,7 @@ public class BlockMetaData {
         EXPECTED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "expectedBytes");
         PAGE_CACHE_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "pageCacheBytes");
         FINISHED_BYTES_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "finishedBytes");
+        IS_BROKEN_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "isBroken");
     }
 
     public BlockMetaData() {
@@ -131,15 +135,39 @@ public class BlockMetaData {
         return lastActiveTime;
     }
 
-    public boolean isBroken() {
-        return isBroken;
+    //将0位设置为1
+    public void setBroken() {
+        //setBroken和seal之间有冲突，因此加锁
+        synchronized (this){
+            int pre = IS_BROKEN_UPDATER.get(this);
+            IS_BROKEN_UPDATER.compareAndSet(this, pre, pre | 1);
+        }
     }
 
-    public void setBroken() {
-        isBroken = true;
+    //将1位设置为1
+    public void setBrokenSubmit() {
+        int pre = IS_BROKEN_UPDATER.get(this);
+        IS_BROKEN_UPDATER.compareAndSet(this, pre, pre | (1 << 1));
+    }
+
+    public boolean isBroken() {
+        return (IS_BROKEN_UPDATER.get(this) & 1) == 1;
+    }
+
+    public boolean isBrokenSubmit() {
+        return (IS_BROKEN_UPDATER.get(this) & (1 << 1)) == (1 << 1);
     }
 
     public void setUnBroken() {
-        isBroken = false;
+        int pre = IS_BROKEN_UPDATER.get(this);
+        IS_BROKEN_UPDATER.compareAndSet(this, pre, 0);
+    }
+
+    public int getIsBroken() {
+        return IS_BROKEN_UPDATER.get(this);
+    }
+
+    public boolean canUpload() {
+        return state == 1 && expectedBytes == pageCacheBytes && pageCacheBytes == finishedBytes;
     }
 }

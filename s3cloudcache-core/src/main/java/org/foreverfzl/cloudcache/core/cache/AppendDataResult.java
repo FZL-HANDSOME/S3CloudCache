@@ -10,7 +10,7 @@ package org.foreverfzl.cloudcache.core.cache;
 public record AppendDataResult(String s3Key, long offset, int size, boolean result, long fileFromOffset,
                                int blockIndex) {
 
-    public static AppendDataResult fail(long fileFromOffset, int blockIndex) {
-        return new AppendDataResult(null, -1, -1, false, fileFromOffset, blockIndex);
+    public static AppendDataResult fail(String s3Key,long fileFromOffset, int blockIndex) {
+        return new AppendDataResult(s3Key, -1, -1, false, fileFromOffset, blockIndex);
     }
 }

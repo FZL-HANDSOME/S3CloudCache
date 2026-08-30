@@ -136,10 +136,10 @@ public class CacheBlockManager {
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
         } catch (InterruptedException e) {
             log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(null,fileFromOffset, blockIndex);
         }
         if (!cacheBlock.isActive()) {
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
         }
         cacheBlock.getReference();
         boolean isError = false;
@@ -149,7 +149,7 @@ public class CacheBlockManager {
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
             if (!cacheBlock.isActive()) {
-                return AppendDataResult.fail(fileFromOffset, blockIndex);
+                return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
             }
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (!isSuccess) {
@@ -165,7 +165,7 @@ public class CacheBlockManager {
             log.error("{} block write failed", cacheBlock.getS3Key(), e);
             isError = true;
             //写入失败或者抛出异常，我们在finally中将block标记为broken并且标记为clean
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
         } finally {
             if (isError) {
                 cacheBlock.setUnActive();
@@ -200,10 +200,10 @@ public class CacheBlockManager {
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
         } catch (InterruptedException e) {
             log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(null,fileFromOffset, blockIndex);
         }
         if (!cacheBlock.isActive()) {
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
         }
         cacheBlock.getReference();
         boolean isError = false;
@@ -217,7 +217,7 @@ public class CacheBlockManager {
                 throw new CoreException("failed to write data in block");
             }
             if (!cacheBlock.isActive()) {
-                return AppendDataResult.fail(fileFromOffset, blockIndex);
+                return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
             }
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (!isSuccess) {
@@ -233,7 +233,7 @@ public class CacheBlockManager {
             log.error("{} block write failed", cacheBlock.getS3Key(), e);
             isError = true;
             //写入失败或者抛出异常，我们在finally中将block标记为broken并且标记为clean
-            return AppendDataResult.fail(fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
         } finally {
             if (isError) {
                 cacheBlock.setUnActive();
@@ -309,6 +309,7 @@ public class CacheBlockManager {
             }
             // 否则获取一个干净的 block
             CloudCacheBlock block = freeBlocks.take();
+            block.setBlockMetaData(blockMetaDataManager.getOrCreate(fileFromOffset, blockIndex));
             block.setS3Key(ProjectUtil.generateUniqueS3Key(prefix, this.instanceName, this.bucketName, fileFromOffset, blockIndex));
             block.setFileFromOffset(fileFromOffset);
             block.setLogicalIndex(blockIndex);

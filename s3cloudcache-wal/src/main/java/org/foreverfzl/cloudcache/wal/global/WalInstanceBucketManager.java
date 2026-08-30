@@ -1,5 +1,8 @@
 package org.foreverfzl.cloudcache.wal.global;
 
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
+import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
@@ -49,7 +52,7 @@ public class WalInstanceBucketManager {
             locks[i] = new ReentrantLock();
         }
         //todo 记得改回15秒
-        checkBlockMetaExecutor.scheduleAtFixedRate(this::checkBlockMeta, 0, 2, TimeUnit.SECONDS);
+        checkBlockMetaExecutor.scheduleWithFixedDelay(this::checkBlockMeta, 0, 2, TimeUnit.SECONDS);
     }
 
     private void checkBlockMeta() {
@@ -70,13 +73,23 @@ public class WalInstanceBucketManager {
                 //获取最后活跃的文件各个属性
                 int blockSize = fileManager.config.blockSize;
                 long wrotePosition = activeFile.wrotePosition;
+                long fileFromOffset = activeFile.fileFromOffset;
                 int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(wrotePosition, blockSize));
                 //获取该fileManager对应的元数据管理者
                 BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                int state = blockMetaDataManager.chackLastActiveTime(activeFile.fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
+                BlockMetaData blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
+                int state = blockMetaDataManager.chackLastActiveTime(blockMetaData, fileFromOffset, blockIndex, curTime, blockMaxIdleTime);
                 if ((state & 1) == 1) {
                     //需要将对应文件中的block数组对应位置设置为1，方便刷盘
                     activeFile.setBlockStateArrayFinishedPageCache(blockIndex);
+                }
+                if ((state & (1 << 1)) == (1 << 1)) {
+                    //需要将该任务提交到上传队列中
+                    blockMetaDataManager.setTaskToUpdateQueue(fileFromOffset, blockIndex);
+                }
+                if ((state & (1 << 2)) == (1 << 2)) {
+                    //需要提交到恢复队列中
+                    blockMetaDataManager.setTaskToRecoverQueue(blockMetaData, fileFromOffset, blockIndex);
                 }
             }
         } catch (Exception e) {

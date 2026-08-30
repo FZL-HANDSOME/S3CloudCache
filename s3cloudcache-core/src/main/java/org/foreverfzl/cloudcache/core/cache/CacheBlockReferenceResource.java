@@ -37,6 +37,7 @@ public abstract class CacheBlockReferenceResource {
     public void setUnDelayClean() {
         this.isDelayClean = false;
     }
+
     public boolean isDelayClean() {
         return isDelayClean;
     }
