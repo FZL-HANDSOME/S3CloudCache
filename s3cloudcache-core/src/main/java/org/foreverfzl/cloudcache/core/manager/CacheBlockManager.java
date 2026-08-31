@@ -4,9 +4,11 @@ import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.cache.CacheBlockReferenceResource;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudchache.common.FutureContext;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -108,7 +110,7 @@ public class CacheBlockManager {
                     return;
                 }
                 //上传
-                blockUpdater.upLoadBlock(cacheBlock);
+                this.updateBlock(cacheBlock);
             } catch (InterruptedException e) {
                 active = false;
                 break;
@@ -116,69 +118,9 @@ public class CacheBlockManager {
         }
     }
 
-    public AppendDataResult appendData(BlockDataStruct dataStruct) {
-        return this.appendData(dataStruct, config.s3KeyPrefix);
+    public AppendDataResult appendData(BlockDataStruct dataStruct, FutureContext futureContext, boolean isAddFuture) {
+        return this.appendData(dataStruct, config.s3KeyPrefix, futureContext, isAddFuture);
     }
-
-    public AppendDataResult appendDataText(BlockDataStruct dataStruct) {
-        return this.appendDataText(dataStruct, config.s3KeyPrefix);
-    }
-
-    public AppendDataResult appendDataText(BlockDataStruct dataStruct, String prefix) {
-        CloudCacheBlock cacheBlock = null;
-        long curWritePosition = 0;
-        int size = 0;
-        long fileFromOffset = dataStruct.getFileFromOffset();
-        int blockIndex = dataStruct.getBlockIndex();
-        try {
-            DefaultMappedFile defaultMappedFile = dataStruct.getDefaultMappedFile();
-            size = dataStruct.getDataLen();
-            cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
-        } catch (InterruptedException e) {
-            log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
-            return AppendDataResult.fail(null,fileFromOffset, blockIndex);
-        }
-        if (!cacheBlock.isActive()) {
-            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
-        }
-        cacheBlock.getReference();
-        boolean isError = false;
-        writeCount.incrementAndGet();
-        try {
-            //每个线程抢到自己的写指针
-            curWritePosition = cacheBlock.tryAcquireWritePosition(size);
-            MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
-            if (!cacheBlock.isActive()) {
-                return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
-            }
-            boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
-            if (!isSuccess) {
-                //失败后重试一次
-                isSuccess = dataStruct.writeTo(cacheBlockSegment);
-            }
-            if (isSuccess) {
-                blockMetaDataManager.addFinishedBytes(fileFromOffset, blockIndex, size);
-            } else {
-                throw new CoreException("failed to write data in block");
-            }
-        } catch (Exception e) {
-            log.error("{} block write failed", cacheBlock.getS3Key(), e);
-            isError = true;
-            //写入失败或者抛出异常，我们在finally中将block标记为broken并且标记为clean
-            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
-        } finally {
-            if (isError) {
-                cacheBlock.setUnActive();
-                cacheBlock.setBroken();
-            }
-            //写完后释放引用
-            cacheBlock.releaseReference();
-            writeCount.decrementAndGet();
-        }
-        return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
-                cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
-    }
-
 
     /**
      * 往指定的Block中添加数据
@@ -188,22 +130,29 @@ public class CacheBlockManager {
      */
     int count = 0;
 
-    public AppendDataResult appendData(BlockDataStruct dataStruct, String prefix) {
+    public AppendDataResult appendData(BlockDataStruct dataStruct, String prefix, FutureContext futureContext, boolean isAddFuture) {
         CloudCacheBlock cacheBlock = null;
         long curWritePosition = 0;
         int size = 0;
         long fileFromOffset = dataStruct.getFileFromOffset();
         int blockIndex = dataStruct.getBlockIndex();
+        BlockMetaData blockMetaData = null;
         try {
             DefaultMappedFile defaultMappedFile = dataStruct.getDefaultMappedFile();
             size = dataStruct.getDataLen();
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
+            blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
+            if (isAddFuture && futureContext != null) {
+                futureContext.setS3Key(cacheBlock.getS3Key());
+                futureContext.setSize(size);
+                blockMetaData.addFuture(futureContext);
+            }
         } catch (InterruptedException e) {
             log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
-            return AppendDataResult.fail(null,fileFromOffset, blockIndex);
+            return AppendDataResult.fail(null, fileFromOffset, blockIndex);
         }
         if (!cacheBlock.isActive()) {
-            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(), fileFromOffset, blockIndex);
         }
         cacheBlock.getReference();
         boolean isError = false;
@@ -217,7 +166,7 @@ public class CacheBlockManager {
                 throw new CoreException("failed to write data in block");
             }
             if (!cacheBlock.isActive()) {
-                return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
+                return AppendDataResult.fail(cacheBlock.getS3Key(), fileFromOffset, blockIndex);
             }
             boolean isSuccess = dataStruct.writeTo(cacheBlockSegment);
             if (!isSuccess) {
@@ -225,7 +174,8 @@ public class CacheBlockManager {
                 isSuccess = dataStruct.writeTo(cacheBlockSegment);
             }
             if (isSuccess) {
-                blockMetaDataManager.addFinishedBytes(fileFromOffset, blockIndex, size);
+                if (isAddFuture && futureContext != null) futureContext.setPhysicalOffset(curWritePosition);
+                blockMetaData.addFinishedBytes(size);
             } else {
                 throw new CoreException("failed to write data in block");
             }
@@ -233,7 +183,7 @@ public class CacheBlockManager {
             log.error("{} block write failed", cacheBlock.getS3Key(), e);
             isError = true;
             //写入失败或者抛出异常，我们在finally中将block标记为broken并且标记为clean
-            return AppendDataResult.fail(cacheBlock.getS3Key(),fileFromOffset, blockIndex);
+            return AppendDataResult.fail(cacheBlock.getS3Key(), fileFromOffset, blockIndex);
         } finally {
             if (isError) {
                 cacheBlock.setUnActive();
@@ -244,8 +194,7 @@ public class CacheBlockManager {
             writeCount.decrementAndGet();
             count++;
         }
-        return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true,
-                cacheBlock.getFileFromOffset(), cacheBlock.getLogicalIndex());
+        return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true);
     }
 
 
@@ -253,6 +202,15 @@ public class CacheBlockManager {
      * 上传Block
      */
     public void updateBlock(CloudCacheBlock cacheBlock) {
+        //将该block对应所有的Future设置为完成
+        long fileFromOffset = cacheBlock.getFileFromOffset();
+        int blockIndex = cacheBlock.getLogicalIndex();
+        BlockMetaData blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
+        if (blockMetaData == null) {
+            log.error("fileFromOffset={}, blockIndex={} can not get BlockMetaData when updateBlock", fileFromOffset, blockIndex);
+            return;
+        }
+        blockMetaData.completeAllFuture();
         //将block元数据设置为上传中
         blockUpdater.upLoadBlock(cacheBlock);
     }

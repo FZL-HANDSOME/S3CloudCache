@@ -324,13 +324,14 @@ public class DefaultMappedFile extends AbstractMappedFile {
         BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
         //获取该文件的引用
         this.hold();
+        long blockOffset;
         try {
             while (true) {
                 currentPos = WROTE_POSITION_UPDATER.get(this);
                 newPos = currentPos + msgSize;
                 logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
                 // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
-                long blockOffset = currentPos & (this.blockSize - 1);
+                blockOffset = currentPos & (this.blockSize - 1);
                 long remainingInBlock = this.blockSize - blockOffset;
                 long paddingPos;
                 if (msgSize > remainingInBlock) {
@@ -389,6 +390,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
             if (result.isOk()) {
                 result.setLogicalIndex(logicalIndex);
+                result.setBlockOffset(blockOffset);
                 //写入成功，增加写入到PageCache字节数
                 blockMetaData = blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize);
             }

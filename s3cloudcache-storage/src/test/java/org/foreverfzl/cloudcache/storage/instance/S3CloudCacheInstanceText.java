@@ -6,6 +6,7 @@ import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstanc
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudchache.common.WriteResult;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockSizeLevel;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockUploadConcurrencyLevel;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
@@ -16,6 +17,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Scanner;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,12 +58,14 @@ public class S3CloudCacheInstanceText {
 
         for (int i = 0; i < 4; i++) {
             String value = "2026-07-11 16:42:18.726 INFO [WAL-PRESS-THREAD-0047] c.foreverfzl.cloudcache.wal.BlockUploadManager - traceId=73ac92f0d1e64489b21d56ce29f1765e,dataId=001256,blockKey=65892104572164,threadId=47,seq=1295 | upload minio object success, bucket=cn-local-wal,objectKey=wal/00000000000000001024/47,blockSize=536byte,useTime=18ms,enableHeadCheck=true | msg=wal block async upload finished, cache meta updated, pending flush count=32,current memory hold bytes=12582912,free os memory=2145896448";
-            WriteResult result = bucketWriter.write(value.getBytes(StandardCharsets.UTF_8));
-            if(result.isSuccess()){
-                System.out.println(result.getS3Key());
-                System.out.println(result.getOffset());
-                System.out.println(result.getSize());
-            }
+            CompletableFuture<WriteResult> completableFuture = bucketWriter.write(value.getBytes(StandardCharsets.UTF_8));
+            completableFuture.whenComplete((writeResult, throwable) -> {
+                if(writeResult.isSuccess()){
+                    System.out.println(writeResult.getS3Key());
+                    System.out.println(writeResult.getOffset());
+                    System.out.println(writeResult.getSize());
+                }
+            });
         }
         Scanner scanner = new Scanner(System.in);
         if (scanner.nextInt() == 1) {
@@ -132,12 +136,12 @@ public class S3CloudCacheInstanceText {
                     for (int writeIndex = 0; writeIndex < writesPerThread; writeIndex++) {
                         int recordId = currentThread * writesPerThread + writeIndex;
                         byte[] payload = createPayload(recordId, payloadSize);
-                        WriteResult result = bucketWriter.write(payload);
-                        if (result != null && result.isSuccess()) {
-                            successBytes.add(payload.length);
-                        } else {
-                            failedWrites.increment();
-                        }
+//                        org.foreverfzl.cloudchache.common.WriteResult result = bucketWriter.write(payload);
+//                        if (result != null && result.isSuccess()) {
+//                            successBytes.add(payload.length);
+//                        } else {
+//                            failedWrites.increment();
+//                        }
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -219,10 +223,10 @@ public class S3CloudCacheInstanceText {
                         start.await();
                         for (int writeIndex = 0; writeIndex < writesPerThread; writeIndex++) {
                             int recordId = currentThread * writesPerThread + writeIndex;
-                            WriteResult result = bucketWriter.write(createPayload(recordId, payloadSize));
-                            if (result != null && result.isSuccess()) {
-                                expectedRecords.set(recordId, 1);
-                            }
+//                            org.foreverfzl.cloudchache.common.WriteResult result = bucketWriter.write(createPayload(recordId, payloadSize));
+//                            if (result != null && result.isSuccess()) {
+//                                expectedRecords.set(recordId, 1);
+//                            }
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();

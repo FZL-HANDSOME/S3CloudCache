@@ -24,7 +24,12 @@ public class AppendMessageResult {
     /**
      * 该数据在改文件的哪逻辑Block中
      */
-    private int logicalIndex;
+    private  int logicalIndex;
+
+    /**
+     * block内部的offset
+     */
+    private long blockOffset;
 
     /**
      * 写入时的时间戳
@@ -37,7 +42,6 @@ public class AppendMessageResult {
         this.status = status;
         this.storeTimestamp = storeTimestamp;
         this.fileFromOffset = fileFromOffset;
-        logicalIndex = -1;
     }
 
 
@@ -100,6 +104,14 @@ public class AppendMessageResult {
 
     public void setLogicalIndex(int logicalIndex) {
         this.logicalIndex = logicalIndex;
+    }
+
+    public void setBlockOffset(long blockOffset) {
+        this.blockOffset = blockOffset;
+    }
+
+    public long getBlockOffset() {
+        return blockOffset;
     }
 
     public DefaultMappedFile getDefaultMappedFile() {

@@ -8,7 +8,8 @@ import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
-import org.foreverfzl.cloudcache.storage.instance.WriteResult;
+import org.foreverfzl.cloudchache.common.FutureContext;
+import org.foreverfzl.cloudchache.common.WriteResult;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
@@ -21,6 +22,8 @@ import org.slf4j.LoggerFactory;
 
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.CRC32;
 
 /**
@@ -65,8 +68,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     //咱们的项目修改为只要数据成功写入到wal文件中WriteResult就为true，
     // 如果一个S3key的WriteResult有一个为false则代表与该S3key相关的数据全部上传失败(让用户自己操作)。
     @Override
-    public WriteResult write(byte[] data) {
-        WriteResult writeResult = null;
+    public CompletableFuture<WriteResult> write(byte[] data) {
+        CompletableFuture<WriteResult> future = new CompletableFuture<>();
+        FutureContext futureContext = new FutureContext(future);
         try {
             AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
             long fileFromOffset = result.getFileFromOffset();
@@ -82,31 +86,34 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 cacheBlock.setUnActive();
                 cacheBlock.setDelayClean();
                 cacheBlock.releaseReference();
+                future.complete(new WriteResult(null, -1, -1, false));
                 //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
-                return new WriteResult(cacheBlock.getS3Key(), -1, -1, false);
+                return future;
             }
+            //wal完成后设置唯一标识
+            futureContext.setWalRecordId(result.getBlockOffset());
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
                     , data, 0, data.length);
-            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct);
-            writeResult = new WriteResult(blockResult.s3Key(), blockResult.offset(), blockResult.size(), true);
+            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct, futureContext,true);
+
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
         }
-        return writeResult;
+        return future;
     }
 
     @Override
-    public WriteResult write(byte[] data, long offset, long length) {
+    public CompletableFuture<WriteResult> write(byte[] data, long offset, long length) {
         return null;
     }
 
     @Override
-    public WriteResult write(ByteBuffer buffer) {
+    public CompletableFuture<WriteResult> write(ByteBuffer buffer) {
         return null;
     }
 
     @Override
-    public WriteResult write(ByteBuffer buffer, long offset, long length) {
+    public CompletableFuture<WriteResult> write(ByteBuffer buffer, long offset, long length) {
         return null;
     }
 
@@ -186,12 +193,20 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             mappedFile.hold();
             try {
                 int blockSize = mappedFile.getBlockSize();
+                long blockOffset = 0;
                 long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);
                 long curPos = fileFromOffset + ((long) blockIndex * blockSize);
                 CRC32 crc = new CRC32();
+                //获取该block对应所有的future
+                ConcurrentHashMap<Long, FutureContext> futureMap = blockMetaData.getFutureMap();
+                if (futureMap == null) {
+                    log.error("fileFromOffset={},blockIndex={},futureMap is null", fileFromOffset, blockIndex);
+                    continue;
+                }
                 //如果可以读int并且是正常数据则读取
                 //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
                 while (true) {
+                    FutureContext futureContext = futureMap.get(blockOffset);
                     if (endPos - curPos <= DataStruct.HEADER_LENGTH) {
                         break;
                     }
@@ -213,11 +228,12 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    cacheBlockManager.appendDataText(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen));
+                    AppendDataResult result = cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen), futureContext,false);
+                    blockOffset = blockOffset + DataStruct.HEADER_LENGTH + (dataLen + 3) & ~3;
                     crc.reset();
                 }
             } catch (Exception e) {
-                log.warn("getBlockBrokenTask failed=>", e);
+                log.error("getBlockBrokenTask failed=>", e);
             } finally {
                 mappedFile.release();
             }

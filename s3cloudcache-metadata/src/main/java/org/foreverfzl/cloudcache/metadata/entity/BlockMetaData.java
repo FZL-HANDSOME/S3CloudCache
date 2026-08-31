@@ -1,6 +1,11 @@
 package org.foreverfzl.cloudcache.metadata.entity;
 
 
+import org.foreverfzl.cloudchache.common.FutureContext;
+import org.foreverfzl.cloudchache.common.WriteResult;
+
+import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 public class BlockMetaData {
@@ -40,6 +45,8 @@ public class BlockMetaData {
     //二进制：第0位为 1则代表broken，第1位为1则代表已经将任务上传到队列中了
     private volatile int isBroken = 0;
 
+    //专门存放该block对应的future
+    ConcurrentHashMap<Long, FutureContext> futureMap = new ConcurrentHashMap<>();
 
     static {
         STATE_UPDATER = AtomicIntegerFieldUpdater.newUpdater(BlockMetaData.class, "state");
@@ -111,6 +118,33 @@ public class BlockMetaData {
         } while (!FINISHED_BYTES_UPDATER.compareAndSet(this, current, next));
     }
 
+    public void addFuture(FutureContext future) {
+        futureMap.put(future.getWalRecordId(), future);
+    }
+
+    public FutureContext getFuture(long walRecordId) {
+        return futureMap.get(walRecordId);
+    }
+
+    public void completeAllFuture() {
+        for (FutureContext value : futureMap.values()) {
+            value.getFuture().complete(new WriteResult(value.getS3Key(), value.getPhysicalOffset(), value.getSize(), true));
+        }
+        futureMap.clear();
+    }
+
+
+    public void failAllFuture(){
+        for (FutureContext value : futureMap.values()) {
+            value.getFuture().complete(new WriteResult(value.getS3Key(), value.getPhysicalOffset(), value.getSize(), false));
+        }
+        futureMap.clear();
+    }
+
+    public ConcurrentHashMap<Long, FutureContext> getFutureMap() {
+        return futureMap;
+    }
+
     public void updateLastTime() {
         this.lastActiveTime = System.currentTimeMillis(); //这里可以容纳误差，简单赋值即可
     }
@@ -138,7 +172,7 @@ public class BlockMetaData {
     //将0位设置为1
     public void setBroken() {
         //setBroken和seal之间有冲突，因此加锁
-        synchronized (this){
+        synchronized (this) {
             int pre = IS_BROKEN_UPDATER.get(this);
             IS_BROKEN_UPDATER.compareAndSet(this, pre, pre | 1);
         }
