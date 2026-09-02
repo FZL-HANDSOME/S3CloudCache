@@ -94,7 +94,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             futureContext.setWalRecordId(result.getBlockOffset());
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
                     , data, 0, data.length);
-            AppendDataResult blockResult = cacheBlockManager.appendData(dataStruct, futureContext,true);
+            cacheBlockManager.appendData(dataStruct, futureContext,true);
 
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
@@ -187,9 +187,10 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 continue;
             }
             //到这里该block的状态为：broken为true并且封口，并且block数据全部写入到了PageCache，并且此时没有其它线程引用该block
-            //在此我们需要将isBroken设置为flase，active设置为true，并且将该CacheBlock的指针设置为0
+            //在此我们需要将isBroken设置为flase，active设置为true，并且将该CacheBlock的指针设置为0，并将元数据的Finish大小设置为0
             cacheBlock.resetWritePosition();
             cacheBlock.setActive();
+            blockMetaData.clearFinishedBytes();
             mappedFile.hold();
             try {
                 int blockSize = mappedFile.getBlockSize();

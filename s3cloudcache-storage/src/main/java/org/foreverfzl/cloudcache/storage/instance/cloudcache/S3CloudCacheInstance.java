@@ -130,6 +130,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
     //启动数据恢复
+    @Override
     public void start() {
         Path instancePath = Paths.get(config.walPath, instanceName);
         if (!Files.exists(instancePath)) {

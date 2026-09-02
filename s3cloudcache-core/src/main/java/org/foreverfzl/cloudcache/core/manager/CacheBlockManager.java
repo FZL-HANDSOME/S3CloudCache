@@ -128,7 +128,6 @@ public class CacheBlockManager {
      * @param dataStruct 数据
      * @return 结果
      */
-    int count = 0;
 
     public AppendDataResult appendData(BlockDataStruct dataStruct, String prefix, FutureContext futureContext, boolean isAddFuture) {
         CloudCacheBlock cacheBlock = null;
@@ -142,10 +141,12 @@ public class CacheBlockManager {
             size = dataStruct.getDataLen();
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
             blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
-            if (isAddFuture && futureContext != null) {
+            if (isAddFuture) {
+                blockMetaData.addFuture(futureContext);
+            }
+            if (futureContext != null) {
                 futureContext.setS3Key(cacheBlock.getS3Key());
                 futureContext.setSize(size);
-                blockMetaData.addFuture(futureContext);
             }
         } catch (InterruptedException e) {
             log.warn("can not get block , fileOffset={}, blockIndex={}", fileFromOffset, blockIndex);
@@ -162,9 +163,6 @@ public class CacheBlockManager {
             curWritePosition = cacheBlock.tryAcquireWritePosition(size);
             MemorySegment cacheBlockSegment = cacheBlock.getWriteMemorySegment(curWritePosition, size);
             //将数据写入Block
-            if (count == 1) {
-                throw new CoreException("failed to write data in block");
-            }
             if (!cacheBlock.isActive()) {
                 return AppendDataResult.fail(cacheBlock.getS3Key(), fileFromOffset, blockIndex);
             }
@@ -174,7 +172,7 @@ public class CacheBlockManager {
                 isSuccess = dataStruct.writeTo(cacheBlockSegment);
             }
             if (isSuccess) {
-                if (isAddFuture && futureContext != null) futureContext.setPhysicalOffset(curWritePosition);
+                if (futureContext != null) futureContext.setPhysicalOffset(curWritePosition);
                 blockMetaData.addFinishedBytes(size);
             } else {
                 throw new CoreException("failed to write data in block");
@@ -192,7 +190,6 @@ public class CacheBlockManager {
             //写完后释放引用
             cacheBlock.releaseReference();
             writeCount.decrementAndGet();
-            count++;
         }
         return new AppendDataResult(cacheBlock.getS3Key(), curWritePosition, size, true);
     }

@@ -118,6 +118,10 @@ public class BlockMetaData {
         } while (!FINISHED_BYTES_UPDATER.compareAndSet(this, current, next));
     }
 
+    public void clearFinishedBytes() {
+        this.finishedBytes = 0;
+    }
+
     public void addFuture(FutureContext future) {
         futureMap.put(future.getWalRecordId(), future);
     }
