@@ -1,6 +1,8 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.core.datastruct.BlockDataStruct;
+import org.foreverfzl.cloudcache.core.datastruct.DirectBlockDataStruct;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
@@ -9,6 +11,7 @@ import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.DirectWalDataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
@@ -72,33 +75,14 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         CompletableFuture<WriteResult> future = new CompletableFuture<>();
         FutureContext futureContext = new FutureContext(future);
         try {
-            AppendMessageResult result = mappedFileManager.appendData(new WalDataStruct(data));
-            long fileFromOffset = result.getFileFromOffset();
-            int logicalIndex = result.getLogicalIndex();
-            //如果出现除了END_OF_FILE、FILE_CLOSED其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
-            if (!result.isOk()) {
-                log.warn("WAL数据添加失败，result==>{}", result);
-                //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
-                //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
-                CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
-                //将CloudCacheBlock标记为unActive并且标记为延迟删除
-                cacheBlock.getReference();
-                cacheBlock.setUnActive();
-                cacheBlock.setDelayClean();
-                cacheBlock.releaseReference();
-                future.complete(new WriteResult(null, -1, -1, false));
-                //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
-                return future;
+            if (data == null) {
+                throw new IllegalArgumentException("data cannot be null");
             }
-            //wal完成后设置唯一标识
-            futureContext.setWalRecordId(result.getBlockOffset());
-            HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
-                    , data, 0, data.length);
-            cacheBlockManager.appendData(dataStruct, futureContext,true);
+            doWrite(new WalDataStruct(data), futureContext, future,
+                    (mappedFile, fileFromOffset, logicalIndex) ->
+                            new HeapBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, data, 0, data.length));
         } catch (Exception e) {
-            log.error("BucketWriterWriter write Exception is=>", e);
-            // 异常时必须完成 Future，否则调用方 whenComplete 永远不触发，
-            // 上层只能靠超时发现"卡死"，无法区分"异常"与"未完成"
+            log.error("BucketWriterWriter writeHeapData Exception is=>", e);
             future.completeExceptionally(e);
         }
         return future;
@@ -107,19 +91,131 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     //将data的[offset,offset+length]部分上传到S3
     @Override
     public CompletableFuture<WriteResult> writeHeapData(byte[] data, long offset, long length) {
-        return null;
+        CompletableFuture<WriteResult> future = new CompletableFuture<>();
+        FutureContext futureContext = new FutureContext(future);
+        try {
+            checkHeapRange(data, offset, length);
+            int fromOffset = (int) offset;
+            int dataLen = (int) length;
+            doWrite(new WalDataStruct(data, fromOffset, dataLen), futureContext, future,
+                    (mappedFile, fileFromOffset, logicalIndex) ->
+                            new HeapBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, data, fromOffset, dataLen));
+        } catch (Exception e) {
+            log.error("BucketWriterWriter writeHeapData Exception is=>", e);
+            future.completeExceptionally(e);
+        }
+        return future;
     }
 
-    //将堆外数据buffer全部上传到S3
+    //将堆外数据buffer的[position,limit)部分全部上传到S3（不推进buffer的position）
     @Override
     public CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer) {
-        return null;
+        CompletableFuture<WriteResult> future = new CompletableFuture<>();
+        FutureContext futureContext = new FutureContext(future);
+        try {
+            if (buffer == null) {
+                throw new IllegalArgumentException("buffer cannot be null");
+            }
+            int dataLen = buffer.remaining();
+            if (dataLen <= 0) {
+                throw new IllegalArgumentException("buffer has no remaining bytes to write");
+            }
+            // MemorySegment.ofBuffer(buffer) 返回覆盖 [position, limit) 的段，size == remaining()
+            MemorySegment segment = MemorySegment.ofBuffer(buffer);
+            doWrite(new DirectWalDataStruct(segment), futureContext, future,
+                    (mappedFile, fileFromOffset, logicalIndex) ->
+                            new DirectBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, 0, dataLen, segment));
+        } catch (Exception e) {
+            log.error("BucketWriterWriter writeOffHeapData Exception is=>", e);
+            future.completeExceptionally(e);
+        }
+        return future;
     }
 
-    //将堆外数据buffer全部上传到S3
+    //将堆外数据buffer的[position+offset,position+offset+length)部分上传到S3（offset相对position，不推进position）
     @Override
     public CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer, long offset, long length) {
-        return null;
+        CompletableFuture<WriteResult> future = new CompletableFuture<>();
+        FutureContext futureContext = new FutureContext(future);
+        try {
+            checkOffHeapRange(buffer, offset, length);
+            int fromOffset = (int) offset;
+            int dataLen = (int) length;
+            // MemorySegment.ofBuffer(buffer) 返回覆盖 [position, limit) 的段，size == remaining()
+            // 因此 fromOffset/dataLen 即相对 position 的偏移与长度
+            MemorySegment segment = MemorySegment.ofBuffer(buffer);
+            doWrite(new DirectWalDataStruct(segment, dataLen, fromOffset), futureContext, future,
+                    (mappedFile, fileFromOffset, logicalIndex) ->
+                            new DirectBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, fromOffset, dataLen, segment));
+        } catch (Exception e) {
+            log.error("BucketWriterWriter writeOffHeapData Exception is=>", e);
+            future.completeExceptionally(e);
+        }
+        return future;
+    }
+
+    /**
+     * 四个 write 方法的公共骨架：WAL 持久化 -> 处理失败 -> 写入物理 Block。
+     * 任何运行时异常向上抛出，由调用方统一 catch 并 completeExceptionally。
+     *
+     * @param walDataStruct  WAL 持久化协议对象（堆内 WalDataStruct 或堆外 DirectWalDataStruct）
+     * @param futureContext  本次写请求的上下文
+     * @param future         返回给调用方的 Future
+     * @param builder        根据 WAL 追加结果构建对应 BlockDataStruct（堆内/堆外）
+     */
+    private void doWrite(DataStruct walDataStruct, FutureContext futureContext, CompletableFuture<WriteResult> future,
+                         BlockDataStructBuilder builder) throws Exception {
+        AppendMessageResult result = mappedFileManager.appendData(walDataStruct);
+        long fileFromOffset = result.getFileFromOffset();
+        int logicalIndex = result.getLogicalIndex();
+        //如果出现除了END_OF_FILE、FILE_CLOSED其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
+        if (!result.isOk()) {
+            log.warn("WAL数据添加失败，result==>{}", result);
+            //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
+            //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
+            CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
+            //将CloudCacheBlock标记为unActive并且标记为延迟删除
+            cacheBlock.getReference();
+            cacheBlock.setUnActive();
+            cacheBlock.setDelayClean();
+            cacheBlock.releaseReference();
+            future.complete(new WriteResult(null, -1, -1, false));
+            //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
+            return;
+        }
+        //wal完成后设置唯一标识
+        futureContext.setWalRecordId(result.getBlockOffset());
+        BlockDataStruct blockDataStruct = builder.build(result.getDefaultMappedFile(), fileFromOffset, logicalIndex);
+        cacheBlockManager.appendData(blockDataStruct, futureContext, true);
+    }
+
+    /**
+     * 根据 WAL 追加结果构建对应的物理 Block 数据结构（堆内/堆外）。
+     */
+    @FunctionalInterface
+    private interface BlockDataStructBuilder {
+        BlockDataStruct build(DefaultMappedFile mappedFile, long fileFromOffset, int logicalIndex);
+    }
+
+    private static void checkHeapRange(byte[] data, long offset, long length) {
+        if (data == null) {
+            throw new IllegalArgumentException("data cannot be null");
+        }
+        if (offset < 0 || length <= 0 || offset > data.length || length > data.length - offset) {
+            throw new IllegalArgumentException("offset/length out of range: offset=" + offset
+                    + ", length=" + length + ", data.length=" + data.length);
+        }
+    }
+
+    private static void checkOffHeapRange(ByteBuffer buffer, long offset, long length) {
+        if (buffer == null) {
+            throw new IllegalArgumentException("buffer cannot be null");
+        }
+        int remaining = buffer.remaining();
+        if (offset < 0 || length <= 0 || offset > remaining || length > remaining - offset) {
+            throw new IllegalArgumentException("offset/length out of range: offset=" + offset
+                    + ", length=" + length + ", buffer.remaining=" + remaining);
+        }
     }
 
     //监听死信队列的数据，内部指明了哪个bucket哪个文件哪个block中的数据上传不上去，
