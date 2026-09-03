@@ -17,7 +17,7 @@ public class DirectWalDataStruct implements DataStruct {
     private final MemorySegment dataSegment;
 
     //堆外指定区域数据
-    public DirectWalDataStruct(MemorySegment dataSegment, int dataLen, int fromOffset) {
+    public DirectWalDataStruct(MemorySegment dataSegment, int fromOffset,int dataLen) {
         this.dataSegment = dataSegment;
         this.dataLen = dataLen;
         this.fromOffset = fromOffset;

@@ -133,13 +133,12 @@ public class CacheBlockManager {
     public AppendDataResult appendData(BlockDataStruct dataStruct, String prefix, FutureContext futureContext, boolean isAddFuture) {
         CloudCacheBlock cacheBlock = null;
         long curWritePosition = 0;
-        int size = 0;
-        long fileFromOffset = dataStruct.getFileFromOffset();
+        int size = dataStruct.getDataLen();
+        DefaultMappedFile defaultMappedFile = dataStruct.getDefaultMappedFile();
+        long fileFromOffset = defaultMappedFile.fileFromOffset;
         int blockIndex = dataStruct.getBlockIndex();
         BlockMetaData blockMetaData = null;
         try {
-            DefaultMappedFile defaultMappedFile = dataStruct.getDefaultMappedFile();
-            size = dataStruct.getDataLen();
             cacheBlock = getBlock(fileFromOffset, blockIndex, prefix, defaultMappedFile);
             blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
             if (isAddFuture) {

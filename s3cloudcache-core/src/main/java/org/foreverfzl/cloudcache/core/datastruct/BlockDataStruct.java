@@ -11,7 +11,6 @@ public interface BlockDataStruct {
 
     boolean writeTo(MemorySegment target);
 
-    long getFileFromOffset();
 
     int getBlockIndex();
 

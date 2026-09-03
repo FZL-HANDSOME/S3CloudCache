@@ -1,6 +1,8 @@
 package org.foreverfzl.cloudcache.core.datastruct;
 
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -10,16 +12,16 @@ import java.lang.foreign.ValueLayout;
  */
 public class DirectBlockDataStruct implements BlockDataStruct{
 
+    private static final Logger log = LoggerFactory.getLogger(DirectBlockDataStruct.class);
+
     private final DefaultMappedFile defaultMappedFile;
-    private final long fileFromOffset;
     private final int blockIndex;
     private final int fromOffset;
     private final int dataLen;
     private final MemorySegment dataSegment;
 
-    public DirectBlockDataStruct(DefaultMappedFile defaultMappedFile,long fileFromOffset, int blockIndex, int fromOffset, int dataLen, MemorySegment dataSegment) {
+    public DirectBlockDataStruct(DefaultMappedFile defaultMappedFile, int blockIndex,  MemorySegment dataSegment,int fromOffset, int dataLen) {
         this.defaultMappedFile = defaultMappedFile;
-        this.fileFromOffset = fileFromOffset;
         this.blockIndex = blockIndex;
         this.fromOffset = fromOffset;
         this.dataLen = dataLen;
@@ -38,14 +40,11 @@ public class DirectBlockDataStruct implements BlockDataStruct{
                     dataLen
             );
             return true;
-        }catch (Exception e){
+        } catch (Exception e) {
+            log.error("DirectBlockDataStruct.writeTo failed: fromOffset={}, dataLen={}, srcSize={}, dstSize={}",
+                    fromOffset, dataLen, dataSegment.byteSize(), target.byteSize(), e);
             return false;
         }
-    }
-
-    @Override
-    public long getFileFromOffset() {
-        return fileFromOffset;
     }
 
 

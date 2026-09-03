@@ -79,8 +79,8 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 throw new IllegalArgumentException("data cannot be null");
             }
             doWrite(new WalDataStruct(data), futureContext, future,
-                    (mappedFile, fileFromOffset, logicalIndex) ->
-                            new HeapBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, data, 0, data.length));
+                    (mappedFile, logicalIndex) ->
+                            new HeapBlockDataStruct(mappedFile, logicalIndex, data, 0, data.length));
         } catch (Exception e) {
             log.error("BucketWriterWriter writeHeapData Exception is=>", e);
             future.completeExceptionally(e);
@@ -98,8 +98,8 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             int fromOffset = (int) offset;
             int dataLen = (int) length;
             doWrite(new WalDataStruct(data, fromOffset, dataLen), futureContext, future,
-                    (mappedFile, fileFromOffset, logicalIndex) ->
-                            new HeapBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, data, fromOffset, dataLen));
+                    (mappedFile, logicalIndex) ->
+                            new HeapBlockDataStruct(mappedFile, logicalIndex, data, fromOffset, dataLen));
         } catch (Exception e) {
             log.error("BucketWriterWriter writeHeapData Exception is=>", e);
             future.completeExceptionally(e);
@@ -120,11 +120,12 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             if (dataLen <= 0) {
                 throw new IllegalArgumentException("buffer has no remaining bytes to write");
             }
-            // MemorySegment.ofBuffer(buffer) 返回覆盖 [position, limit) 的段，size == remaining()
-            MemorySegment segment = MemorySegment.ofBuffer(buffer);
-            doWrite(new DirectWalDataStruct(segment), futureContext, future,
-                    (mappedFile, fileFromOffset, logicalIndex) ->
-                            new DirectBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, 0, dataLen, segment));
+            // 用 slice() 把 [position, limit) 归一化成 [0, dataLen)，再包装成 MemorySegment，
+            // 规避 MemorySegment.ofBuffer 对 position/limit 的语义差异，保证段大小 == dataLen
+            MemorySegment segment = MemorySegment.ofBuffer(buffer.slice());
+            doWrite(new DirectWalDataStruct(segment, 0, dataLen), futureContext, future,
+                    (mappedFile, logicalIndex) ->
+                            new DirectBlockDataStruct(mappedFile, logicalIndex, segment, 0, dataLen));
         } catch (Exception e) {
             log.error("BucketWriterWriter writeOffHeapData Exception is=>", e);
             future.completeExceptionally(e);
@@ -132,21 +133,31 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         return future;
     }
 
-    //将堆外数据buffer的[position+offset,position+offset+length)部分上传到S3（offset相对position，不推进position）
+    /**
+     * 将堆外数据 buffer 的 [position+offset, position+offset+length) 部分上传到 S3
+     *
+     * @param buffer 堆外数据
+     * @param offset 相对于当前 position 的偏移量（必须 >= 0）
+     * @param length 要上传的数据长度
+     *               注意：不会推进 buffer 的 position
+     *               示例：若 buffer.position()=10, offset=5, length=20，则上传 [15, 35)
+     */
     @Override
     public CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer, long offset, long length) {
         CompletableFuture<WriteResult> future = new CompletableFuture<>();
         FutureContext futureContext = new FutureContext(future);
         try {
             checkOffHeapRange(buffer, offset, length);
-            int fromOffset = (int) offset;
-            int dataLen = (int) length;
-            // MemorySegment.ofBuffer(buffer) 返回覆盖 [position, limit) 的段，size == remaining()
-            // 因此 fromOffset/dataLen 即相对 position 的偏移与长度
-            MemorySegment segment = MemorySegment.ofBuffer(buffer);
-            doWrite(new DirectWalDataStruct(segment, dataLen, fromOffset), futureContext, future,
-                    (mappedFile, fileFromOffset, logicalIndex) ->
-                            new DirectBlockDataStruct(mappedFile, fileFromOffset, logicalIndex, fromOffset, dataLen, segment));
+            // 创建副本并调整到目标范围
+            int len = (int) length;
+            ByteBuffer dup = buffer.duplicate();
+            int startPos = dup.position() + (int) offset;
+            dup.position(startPos);
+            dup.limit(startPos + len);
+            MemorySegment segment = MemorySegment.ofBuffer(dup);
+            doWrite(new DirectWalDataStruct(segment, 0, len), futureContext, future,
+                    (mappedFile, logicalIndex) ->
+                            new DirectBlockDataStruct(mappedFile, logicalIndex, segment, 0, len));
         } catch (Exception e) {
             log.error("BucketWriterWriter writeOffHeapData Exception is=>", e);
             future.completeExceptionally(e);
@@ -158,10 +169,10 @@ public class BucketWriterWriter extends AbstractBucketWriter {
      * 四个 write 方法的公共骨架：WAL 持久化 -> 处理失败 -> 写入物理 Block。
      * 任何运行时异常向上抛出，由调用方统一 catch 并 completeExceptionally。
      *
-     * @param walDataStruct  WAL 持久化协议对象（堆内 WalDataStruct 或堆外 DirectWalDataStruct）
-     * @param futureContext  本次写请求的上下文
-     * @param future         返回给调用方的 Future
-     * @param builder        根据 WAL 追加结果构建对应 BlockDataStruct（堆内/堆外）
+     * @param walDataStruct WAL 持久化协议对象（堆内 WalDataStruct 或堆外 DirectWalDataStruct）
+     * @param futureContext 本次写请求的上下文
+     * @param future        返回给调用方的 Future
+     * @param builder       根据 WAL 追加结果构建对应 BlockDataStruct（堆内/堆外）
      */
     private void doWrite(DataStruct walDataStruct, FutureContext futureContext, CompletableFuture<WriteResult> future,
                          BlockDataStructBuilder builder) throws Exception {
@@ -189,7 +200,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         }
         //wal完成后设置唯一标识
         futureContext.setWalRecordId(result.getBlockOffset());
-        BlockDataStruct blockDataStruct = builder.build(result.getDefaultMappedFile(), fileFromOffset, logicalIndex);
+        BlockDataStruct blockDataStruct = builder.build(result.getDefaultMappedFile(), logicalIndex);
         cacheBlockManager.appendData(blockDataStruct, futureContext, true);
     }
 
@@ -198,7 +209,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
      */
     @FunctionalInterface
     private interface BlockDataStructBuilder {
-        BlockDataStruct build(DefaultMappedFile mappedFile, long fileFromOffset, int logicalIndex);
+        BlockDataStruct build(DefaultMappedFile mappedFile, int logicalIndex);
     }
 
     private static void checkHeapRange(byte[] data, long offset, long length) {
@@ -300,8 +311,10 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             try {
                 int blockSize = mappedFile.getBlockSize();
                 long blockOffset = 0;
-                long endPos = fileFromOffset + ((long) (blockIndex + 1) * blockSize);
-                long curPos = fileFromOffset + ((long) blockIndex * blockSize);
+                // curPos/endPos 是“文件内相对偏移”：getIntFromDataArea/getOrgDataFromDataArea 内部会再加 FILE_META_SIZE，
+                // 因此这里不能加上全局 fileFromOffset，否则会越界访问 mappedMemorySegment
+                long endPos = ((long) (blockIndex + 1) * blockSize);
+                long curPos = ((long) blockIndex * blockSize);
                 CRC32 crc = new CRC32();
                 //获取该block对应所有的future
                 ConcurrentHashMap<Long, FutureContext> futureMap = blockMetaData.getFutureMap();
@@ -334,7 +347,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen), futureContext,false);
+                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, blockIndex, orgData, 0, dataLen), futureContext, false);
                     blockOffset = blockOffset + DataStruct.HEADER_LENGTH + (dataLen + 3) & ~3;
                     crc.reset();
                 }

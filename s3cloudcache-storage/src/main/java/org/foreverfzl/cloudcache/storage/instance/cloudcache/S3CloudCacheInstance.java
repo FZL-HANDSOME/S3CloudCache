@@ -304,7 +304,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                         }
                         blockMetaDataManager.addExpectedBytes(fileFromOffset, blockIndex, valueLen);
                         blockMetaDataManager.addPageCacheBytes(fileFromOffset, blockIndex, valueLen);
-                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, fileFromOffset, blockIndex, orgData, 0, valueLen), prefix,null,false);
+                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, blockIndex, orgData, 0, valueLen), prefix,null,false);
                         crc32.reset();
                     }
                     //尝试封口
