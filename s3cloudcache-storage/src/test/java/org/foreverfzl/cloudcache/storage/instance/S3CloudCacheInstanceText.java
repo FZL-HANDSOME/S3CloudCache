@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -49,6 +50,7 @@ public class S3CloudCacheInstanceText {
 //        text();
 //        highConcurrencyTest();
 //        dataIntegrityTest();
+        offHeapDataIntegrityTest();
     }
 
 
@@ -502,5 +504,211 @@ public class S3CloudCacheInstanceText {
         } finally {
             verifyClient.close();
         }
+    }
+
+
+    // ========================================================================
+    // 堆外数据完整性测试（writeOffHeapData 两种重载）
+    // 目标：验证通过 DirectByteBuffer 写入的原始字节与上传到 S3 后读回的字节逐字节一致。
+    // 覆盖：
+    //   1. writeOffHeapData(ByteBuffer)                 —— 写 buffer 的 [position, limit)
+    //   2. writeOffHeapData(ByteBuffer, offset, length) —— 写 buffer 的 [position+offset, position+offset+length)
+    // 判定规则：与 dataIntegrityTest 一致（超时/数量/字节比对任一不满足即抛 AssertionError）。
+    // ========================================================================
+    public static void offHeapDataIntegrityTest() throws Exception {
+        S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
+        BucketConfig defaultBucketConfig = new BucketConfig();
+        defaultBucketConfig
+                .setBlockSize(BlockSizeLevel.TINY.getBytes())
+                .setCacheSize(32 * 1024 * 1024L)
+                .setBlockUpLoadCount(BlockUploadConcurrencyLevel.NORMAL.getConcurrency())
+                .setS3KeyPrefix(S3_KEY_PREFIX)
+                .setLockMappedFilePageCache(false)
+                .setWarmWalFile(true)
+                .setWalFileSize(32 * 1024 * 1024L);
+        S3CloudCacheConfig config = new S3CloudCacheConfig("textinstance-offheap", null, defaultBucketConfig);
+        config.blockMaxIdleTime = 15000;
+        S3CloudCacheInstance instance = new S3CloudCacheInstance(instanceClient, config);
+        instance.start();
+        BucketWriterWriter writer = instance.getBucketWriterInstance(BUCKET_NAME);
+
+        int wholeBufferCount = 500;  // 场景一：整块 DirectByteBuffer
+        int subRangeCount = 500;     // 场景二：打包 buffer 的 [offset, offset+length) 子区间
+        int total = wholeBufferCount + subRangeCount;
+
+        // 预生成确定性、长度各异的原始数据（总量约 2.4MB，会跨越一个 TINY(2MB) Block）
+        List<byte[]> originalDataList = new ArrayList<>(total);
+        for (int i = 0; i < total; i++) {
+            String content = String.format("[offheap-%04d] 堆外数据完整性测试 DIRECT_BUFFER verifyBytes=%d tail:", i, i * 11);
+            byte[] padding = new byte[i * 5];
+            Arrays.fill(padding, (byte) ((i * 7) % 127));
+            byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
+            byte[] data = new byte[contentBytes.length + padding.length];
+            System.arraycopy(contentBytes, 0, data, 0, contentBytes.length);
+            System.arraycopy(padding, 0, data, contentBytes.length, padding.length);
+            originalDataList.add(data);
+        }
+
+        CountDownLatch writeLatch = new CountDownLatch(total);
+        CopyOnWriteArrayList<Object[]> resultPairs = new CopyOnWriteArrayList<>();
+        AtomicInteger writeFailCount = new AtomicInteger(0);
+
+        log.info("[堆外数据测试] 开始写入 {} 条堆外数据（wholeBuffer={}, subRange={}）",
+                total, wholeBufferCount, subRangeCount);
+
+        boolean writeCompleted;
+        try {
+            // 场景一：writeOffHeapData(ByteBuffer) —— 每条数据一个独立 DirectByteBuffer
+            for (int i = 0; i < wholeBufferCount; i++) {
+                byte[] original = originalDataList.get(i);
+                ByteBuffer buffer = ByteBuffer.allocateDirect(original.length);
+                buffer.put(original);
+                buffer.flip();  // position=0, limit=length
+                int recordIndex = i;
+                writer.writeOffHeapData(buffer).whenComplete((res, thr) ->
+                        onWriteDone("[堆外数据测试]", recordIndex, original, res, thr,
+                                resultPairs, writeFailCount, writeLatch));
+            }
+
+            // 场景二：writeOffHeapData(ByteBuffer, offset, length) —— 多条记录打包进一个 DirectByteBuffer
+            int recordsPerBuffer = 8;
+            for (int groupStart = wholeBufferCount; groupStart < total; groupStart += recordsPerBuffer) {
+                int groupEnd = Math.min(groupStart + recordsPerBuffer, total);
+                int count = groupEnd - groupStart;
+                int packedSize = 0;
+                for (int i = groupStart; i < groupEnd; i++) {
+                    packedSize += originalDataList.get(i).length;
+                }
+                ByteBuffer packed = ByteBuffer.allocateDirect(packedSize);
+                int[] offsets = new int[count];
+                int[] lengths = new int[count];
+                int pos = 0;
+                for (int i = groupStart; i < groupEnd; i++) {
+                    byte[] rec = originalDataList.get(i);
+                    offsets[i - groupStart] = pos;
+                    lengths[i - groupStart] = rec.length;
+                    packed.put(rec);
+                    pos += rec.length;
+                }
+                packed.flip();  // position=0, limit=packedSize
+                for (int i = groupStart; i < groupEnd; i++) {
+                    int off = offsets[i - groupStart];
+                    int len = lengths[i - groupStart];
+                    byte[] original = originalDataList.get(i);
+                    int recordIndex = i;
+                    writer.writeOffHeapData(packed, off, len).whenComplete((res, thr) ->
+                            onWriteDone("[堆外数据测试]", recordIndex, original, res, thr,
+                                    resultPairs, writeFailCount, writeLatch));
+                }
+            }
+
+            writeCompleted = writeLatch.await(120, TimeUnit.SECONDS);
+
+            log.info("[堆外数据测试] 写入阶段结束：成功={}, 失败={}, latch超时={}",
+                    resultPairs.size(), writeFailCount.get(), !writeCompleted);
+
+            if (!writeCompleted) {
+                fail("[堆外数据测试] 写入阶段超时：仍有 " + writeLatch.getCount() + " 条 Future 未完成");
+            }
+            if (writeFailCount.get() != 0) {
+                fail("[堆外数据测试] 写入阶段存在失败：失败数=" + writeFailCount.get());
+            }
+            if (resultPairs.size() != total) {
+                fail("[堆外数据测试] 写入成功数不匹配：期望=" + total + ", 实际=" + resultPairs.size());
+            }
+        } finally {
+            try {
+                instance.close(15000, 15000, 15000);
+            } catch (Exception closeEx) {
+                log.error("[堆外数据测试] instance.close() 失败", closeEx);
+            }
+        }
+
+        // ---- 回读阶段：从 S3 按 offset+size 精确读取并逐字节对比 ----
+        S3Client verifyClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
+        int passCount = 0;
+        int failCount = 0;
+        try {
+            for (Object[] pair : resultPairs) {
+                byte[] original = (byte[]) pair[0];
+                WriteResult wr = (WriteResult) pair[1];
+                String s3Key = wr.getS3Key();
+                long offset = wr.getOffset();
+                int size = wr.getSize();
+
+                if (size != original.length) {
+                    log.error("[堆外数据测试] size不匹配: s3Key={} offset={} expectedSize={} actualSize={}",
+                            s3Key, offset, original.length, size);
+                    failCount++;
+                    continue;
+                }
+
+                String range = "bytes=" + offset + "-" + (offset + size - 1);
+                GetObjectRequest getReq = GetObjectRequest.builder()
+                        .bucket(BUCKET_NAME)
+                        .key(s3Key)
+                        .range(range)
+                        .build();
+
+                try (ResponseInputStream<GetObjectResponse> s3Stream = verifyClient.getObject(getReq)) {
+                    byte[] readBack = s3Stream.readAllBytes();
+                    if (readBack.length != size) {
+                        log.error("[堆外数据测试] 读回字节数不匹配: s3Key={} offset={} expectedSize={} readBackSize={}",
+                                s3Key, offset, size, readBack.length);
+                        failCount++;
+                        continue;
+                    }
+                    if (Arrays.equals(original, readBack)) {
+                        passCount++;
+                        log.debug("[堆外数据测试] PASS: s3Key={} offset={} size={}", s3Key, offset, size);
+                    } else {
+                        failCount++;
+                        int diffPos = -1;
+                        for (int k = 0; k < original.length; k++) {
+                            if (original[k] != readBack[k]) {
+                                diffPos = k;
+                                break;
+                            }
+                        }
+                        if (diffPos >= 0) {
+                            log.error("[堆外数据测试] FAIL：数据不一致! s3Key={} offset={} size={} 首个差异字节位置={} 期望=0x{} 实际=0x{}",
+                                    s3Key, offset, size, diffPos,
+                                    Integer.toHexString(original[diffPos] & 0xFF),
+                                    Integer.toHexString(readBack[diffPos] & 0xFF));
+                        } else {
+                            log.error("[堆外数据测试] FAIL：数据不一致! s3Key={} offset={} size={}", s3Key, offset, size);
+                        }
+                    }
+                } catch (IOException e) {
+                    log.error("[堆外数据测试] 从S3读取数据失败: s3Key={} offset={} size={} err={}",
+                            s3Key, offset, size, e.getMessage());
+                    failCount++;
+                }
+            }
+
+            log.info("[堆外数据测试] 最终结果：PASS={}, FAIL={}, 写入失败={}",
+                    passCount, failCount, writeFailCount.get());
+
+            if (failCount != 0 || passCount != total) {
+                fail("[堆外数据测试] 回读校验失败：PASS=" + passCount + ", FAIL=" + failCount + ", 期望=" + total);
+            }
+            log.info("[堆外数据测试] ALL PASSED：堆外写入数据与S3数据完全一致");
+        } finally {
+            verifyClient.close();
+        }
+    }
+
+    /**
+     * 写入回调统一处理：成功收集 (original, WriteResult)，失败计数，并递减 latch。
+     */
+    private static void onWriteDone(String test, int index, byte[] original, WriteResult res, Throwable thr,
+                                    CopyOnWriteArrayList<Object[]> pairs, AtomicInteger failCount, CountDownLatch latch) {
+        if (thr != null || res == null || !res.isSuccess()) {
+            log.error("{} 写入失败: record={}, res={}, thr={}", test, index, res, thr);
+            failCount.incrementAndGet();
+        } else {
+            pairs.add(new Object[]{original, res});
+        }
+        latch.countDown();
     }
 }

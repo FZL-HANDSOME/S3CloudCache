@@ -313,6 +313,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
             return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.INVALID_ARGUMENT, this.fileFromOffset);
         }
         long msgSize = dataStruct.getSerializedSize();
+        // 单条消息比一个逻辑 Block 还大时，永远无法写入（会一路 padding 到文件末尾并不断新建文件），直接拒绝
+        if (msgSize > this.blockSize) {
+            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.MESSAGE_TOO_LARGE, this.fileFromOffset);
+        }
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;

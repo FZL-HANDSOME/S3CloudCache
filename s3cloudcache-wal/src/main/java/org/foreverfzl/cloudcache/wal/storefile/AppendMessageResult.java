@@ -24,7 +24,7 @@ public class AppendMessageResult {
     /**
      * 该数据在改文件的哪逻辑Block中
      */
-    private  int logicalIndex;
+    private int logicalIndex = -1;
 
     /**
      * block内部的offset
@@ -77,6 +77,10 @@ public class AppendMessageResult {
          * 文件关闭
          */
         FILE_CLOSED,
+        /**
+         * 单条消息大小超过一个逻辑 Block，无法写入
+         */
+        MESSAGE_TOO_LARGE,
     }
 
     /**

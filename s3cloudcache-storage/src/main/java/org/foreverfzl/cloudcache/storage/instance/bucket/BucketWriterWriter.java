@@ -171,14 +171,18 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         //如果出现除了END_OF_FILE、FILE_CLOSED其它错误，先将该Block的所有相关信息作废(元数据、物理Block等)
         if (!result.isOk()) {
             log.warn("WAL数据添加失败，result==>{}", result);
-            //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
-            //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
-            CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
-            //将CloudCacheBlock标记为unActive并且标记为延迟删除
-            cacheBlock.getReference();
-            cacheBlock.setUnActive();
-            cacheBlock.setDelayClean();
-            cacheBlock.releaseReference();
+            // 只有确认了逻辑 Block 序号（logicalIndex >= 0）才需要作废对应的物理 Block；
+            // FILE_CLOSED / INVALID_ARGUMENT / MESSAGE_TOO_LARGE 等场景下 logicalIndex 为 -1，无需处理
+            if (logicalIndex >= 0) {
+                //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
+                //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
+                CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
+                //将CloudCacheBlock标记为unActive并且标记为延迟删除
+                cacheBlock.getReference();
+                cacheBlock.setUnActive();
+                cacheBlock.setDelayClean();
+                cacheBlock.releaseReference();
+            }
             future.complete(new WriteResult(null, -1, -1, false));
             //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
             return;
