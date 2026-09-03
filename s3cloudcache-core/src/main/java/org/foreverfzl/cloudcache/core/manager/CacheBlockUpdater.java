@@ -2,7 +2,6 @@ package org.foreverfzl.cloudcache.core.manager;
 
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
-import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.exception.CoreException;
 import org.slf4j.Logger;

@@ -6,7 +6,6 @@ import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 
 import java.lang.foreign.MemorySegment;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 /**

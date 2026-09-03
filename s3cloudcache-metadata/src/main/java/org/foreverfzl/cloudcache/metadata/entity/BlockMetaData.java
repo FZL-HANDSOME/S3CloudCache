@@ -4,7 +4,6 @@ package org.foreverfzl.cloudcache.metadata.entity;
 import org.foreverfzl.cloudchache.common.FutureContext;
 import org.foreverfzl.cloudchache.common.WriteResult;
 
-import java.util.HashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 

@@ -1,6 +1,5 @@
 package org.foreverfzl.cloudcache.storage.instance.bucket;
 
-import org.foreverfzl.cloudcache.core.cache.AppendDataResult;
 import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
 import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
@@ -8,15 +7,15 @@ import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
-import org.foreverfzl.cloudchache.common.FutureContext;
-import org.foreverfzl.cloudchache.common.WriteResult;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
+import org.foreverfzl.cloudchache.common.FutureContext;
 import org.foreverfzl.cloudchache.common.LogName;
+import org.foreverfzl.cloudchache.common.WriteResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -95,9 +94,11 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             HeapBlockDataStruct dataStruct = new HeapBlockDataStruct(result.getDefaultMappedFile(), fileFromOffset, logicalIndex
                     , data, 0, data.length);
             cacheBlockManager.appendData(dataStruct, futureContext,true);
-
         } catch (Exception e) {
             log.error("BucketWriterWriter write Exception is=>", e);
+            // 异常时必须完成 Future，否则调用方 whenComplete 永远不触发，
+            // 上层只能靠超时发现"卡死"，无法区分"异常"与"未完成"
+            future.completeExceptionally(e);
         }
         return future;
     }
@@ -229,7 +230,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                         break;
                     }
                     //调用API正常恢复数据
-                    AppendDataResult result = cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen), futureContext,false);
+                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, fileFromOffset, blockIndex, orgData, 0, dataLen), futureContext,false);
                     blockOffset = blockOffset + DataStruct.HEADER_LENGTH + (dataLen + 3) & ~3;
                     crc.reset();
                 }

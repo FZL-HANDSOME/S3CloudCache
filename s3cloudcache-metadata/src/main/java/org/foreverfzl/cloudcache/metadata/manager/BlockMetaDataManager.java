@@ -4,7 +4,6 @@ import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.metadata.entity.DeadDataInfo;
 import org.foreverfzl.cloudcache.metadata.entity.RecoverTask;
 import org.foreverfzl.cloudcache.metadata.entity.UploadTask;
-import org.foreverfzl.cloudchache.common.FutureContext;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
