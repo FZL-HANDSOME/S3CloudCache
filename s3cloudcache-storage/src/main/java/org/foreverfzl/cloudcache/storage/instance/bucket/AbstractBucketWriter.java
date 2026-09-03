@@ -13,7 +13,7 @@ public abstract class AbstractBucketWriter implements Writer {
      * @param data
      * @return
      */
-    public abstract CompletableFuture<WriteResult> write(byte[] data);
+    public abstract CompletableFuture<WriteResult> writeHeapData(byte[] data);
 
     /**
      * 照顾池化了 byte[] 的业务，避免了业务层的二次数组裁剪。
@@ -23,7 +23,7 @@ public abstract class AbstractBucketWriter implements Writer {
      * @param length
      * @return
      */
-    public abstract CompletableFuture<WriteResult> write(byte[] data, long offset, long length);
+    public abstract CompletableFuture<WriteResult> writeHeapData(byte[] data, long offset, long length);
 
     /**
      * 面向 Netty/网络层网关等极致吞吐场景，数据完全在堆外飞驰，JVM 堆内存冷眼旁观，实现真正的 零 JVM拷贝
@@ -31,7 +31,7 @@ public abstract class AbstractBucketWriter implements Writer {
      * @param buffer
      * @return
      */
-    public abstract CompletableFuture<WriteResult> write(ByteBuffer buffer);
+    public abstract CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer);
 
     /**
      * 面向 Netty/网络层网关等极致吞吐场景，数据完全在堆外飞驰，JVM 堆内存冷眼旁观，实现真正的 零 JVM拷贝
@@ -39,7 +39,7 @@ public abstract class AbstractBucketWriter implements Writer {
      * @param buffer
      * @return
      */
-    public abstract CompletableFuture<WriteResult> write(ByteBuffer buffer, long offset, long length);
+    public abstract CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer, long offset, long length);
 
     /**
      * 监听死信队列中的数据

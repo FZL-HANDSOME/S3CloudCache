@@ -5,7 +5,7 @@ import java.lang.foreign.ValueLayout;
 import java.util.zip.CRC32;
 
 /**
- * 磁盘持久化协议格式
+ * 针对堆内数据
  */
 public final class WalDataStruct implements DataStruct{
 

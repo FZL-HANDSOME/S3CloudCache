@@ -66,8 +66,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     //咱们的项目修改为只要数据成功写入到wal文件中WriteResult就为true，
     // 如果一个S3key的WriteResult有一个为false则代表与该S3key相关的数据全部上传失败(让用户自己操作)。
+    //将data全部上传到S3
     @Override
-    public CompletableFuture<WriteResult> write(byte[] data) {
+    public CompletableFuture<WriteResult> writeHeapData(byte[] data) {
         CompletableFuture<WriteResult> future = new CompletableFuture<>();
         FutureContext futureContext = new FutureContext(future);
         try {
@@ -103,18 +104,21 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         return future;
     }
 
+    //将data的[offset,offset+length]部分上传到S3
     @Override
-    public CompletableFuture<WriteResult> write(byte[] data, long offset, long length) {
+    public CompletableFuture<WriteResult> writeHeapData(byte[] data, long offset, long length) {
         return null;
     }
 
+    //将堆外数据buffer全部上传到S3
     @Override
-    public CompletableFuture<WriteResult> write(ByteBuffer buffer) {
+    public CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer) {
         return null;
     }
 
+    //将堆外数据buffer全部上传到S3
     @Override
-    public CompletableFuture<WriteResult> write(ByteBuffer buffer, long offset, long length) {
+    public CompletableFuture<WriteResult> writeOffHeapData(ByteBuffer buffer, long offset, long length) {
         return null;
     }
 

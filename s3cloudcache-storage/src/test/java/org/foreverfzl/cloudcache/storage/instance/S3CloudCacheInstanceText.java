@@ -76,7 +76,7 @@ public class S3CloudCacheInstanceText {
 
         for (int i = 0; i < 4; i++) {
             String value = "2026-07-11 16:42:18.726 INFO [WAL-PRESS-THREAD-0047] c.foreverfzl.cloudcache.wal.BlockUploadManager - traceId=73ac92f0d1e64489b21d56ce29f1765e,dataId=001256,blockKey=65892104572164,threadId=47,seq=1295 | upload minio object success, bucket=cn-local-wal,objectKey=wal/00000000000000001024/47,blockSize=536byte,useTime=18ms,enableHeadCheck=true | msg=wal block async upload finished, cache meta updated, pending flush count=32,current memory hold bytes=12582912,free os memory=2145896448";
-            CompletableFuture<WriteResult> completableFuture = bucketWriter.write(value.getBytes(StandardCharsets.UTF_8));
+            CompletableFuture<WriteResult> completableFuture = bucketWriter.writeHeapData(value.getBytes(StandardCharsets.UTF_8));
             completableFuture.whenComplete((writeResult, throwable) -> {
                 if (writeResult.isSuccess()) {
                     log.info("S3key= {} \n;offset= {}\n;size= {}", writeResult.getS3Key(), writeResult.getOffset(), writeResult.getSize());
@@ -149,7 +149,7 @@ public class S3CloudCacheInstanceText {
                         byte[] original = ("thread-" + threadId + "-seq-" + j
                                 + "-PAYLOAD-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789").getBytes(StandardCharsets.UTF_8);
                         try {
-                            CompletableFuture<WriteResult> future = writer.write(original);
+                            CompletableFuture<WriteResult> future = writer.writeHeapData(original);
                             int seqJ = j;
                             future.whenComplete((res, thr) -> {
                                 if (thr != null) {
@@ -383,7 +383,7 @@ public class S3CloudCacheInstanceText {
         try {
             for (int i = 0; i < writeCount; i++) {
                 byte[] original = originalDataList.get(i);
-                CompletableFuture<WriteResult> future = writer.write(original);
+                CompletableFuture<WriteResult> future = writer.writeHeapData(original);
                 future.whenComplete((res, thr) -> {
                     if (thr != null || res == null || !res.isSuccess()) {
                         log.error("[数据完整性测试] 写入失败: res={}, thr={}", res, thr);
