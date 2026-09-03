@@ -33,6 +33,7 @@ public class DirectBlockDataStruct implements BlockDataStruct{
         try {
             MemorySegment.copy(
                     dataSegment,
+                    ValueLayout.JAVA_BYTE,
                     fromOffset,
                     target,
                     ValueLayout.JAVA_BYTE,

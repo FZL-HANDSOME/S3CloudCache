@@ -105,6 +105,6 @@ public class DirectWalDataStruct implements DataStruct {
         );
         pos+=4;
         // 5. Data Bytes
-        MemorySegment.copy(dataSegment, fromOffset, target, pos, dataLen);
+        MemorySegment.copy(dataSegment, ValueLayout.JAVA_BYTE, fromOffset, target, ValueLayout.JAVA_BYTE, pos, dataLen);
     }
 }
