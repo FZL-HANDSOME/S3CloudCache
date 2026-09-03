@@ -340,9 +340,22 @@ public class DefaultMappedFile extends AbstractMappedFile {
                     //看看文件是否结尾
                     // 尝试 CAS 抢占这段残渣空间用来做 Padding
                     if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                        //将该block设置为封口
-                        if ((blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex) & 1) == 1) {
+                        //将该block设置为封口，并根据返回的位掩码处理后续动作
+                        // bit0=数据已全部落入PageCache(可推进read指针)
+                        // bit1=该Block已满足上传条件(投递上传任务)
+                        // bit2=该Block物理写入损坏(投递恢复任务)
+                        int sealResult = blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex);
+                        if ((sealResult & 1) == 1) {
                             setBlockStateArrayFinishedPageCache(logicalIndex);
+                        }
+                        if ((sealResult & (1 << 1)) == (1 << 1)) {
+                            // 关键修复：封口时若 expectedBytes==pageCacheBytes==finishedBytes 已对齐，
+                            // 必须主动投递上传任务。否则最后一个业务线程的 releaseReference 已先于封口执行，
+                            // 该Block会永远停留在"已封口且字节对齐但无人触发上传"的状态。
+                            blockMetaDataManager.setTaskToUpdateQueue(this.fileFromOffset, logicalIndex);
+                        }
+                        if ((sealResult & (1 << 2)) == (1 << 2)) {
+                            blockMetaDataManager.setTaskToRecoverQueue(blockMetaDataManager.getBlockMetaData(this.fileFromOffset, logicalIndex), this.fileFromOffset, logicalIndex);
                         }
                         //如果是文件结尾则直接返回
                         if (paddingPos == this.fileSize) {

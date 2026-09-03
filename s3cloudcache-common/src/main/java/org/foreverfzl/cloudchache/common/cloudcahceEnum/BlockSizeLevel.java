@@ -1,10 +1,12 @@
 package org.foreverfzl.cloudchache.common.cloudcahceEnum;
 
 public enum BlockSizeLevel {
-    SMALL(8 * 1024 * 1024),     // 8MB
-    MEDIUM(16 * 1024 * 1024),     // 16MB
-    LARGE(32 * 1024 * 1024),     // 32MB
-    ULTRA(64 * 1024 * 1024);        // 64MB
+
+    TINY(2 * 1024 * 1024),
+    SMALL(4 * 1024 * 1024),
+    MEDIUM(8 * 1024 * 1024),
+    LARGE(16 * 1024 * 1024),
+    ULTRA(32 * 1024 * 1024);
 
     private final int bytes;
 

@@ -162,7 +162,7 @@ public class BlockMetaDataManager {
     }
 
 
-    public int trySeal(long fileFromOffset, int blockIndex, BlockMetaData blockMetaData) {
+    public int trySeal(long fileFromOffset, int blockIndex,BlockMetaData blockMetaData) {
         if (blockMetaData == null) {
             blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         }

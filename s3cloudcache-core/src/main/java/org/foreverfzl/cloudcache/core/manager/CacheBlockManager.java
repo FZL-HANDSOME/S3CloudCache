@@ -107,7 +107,8 @@ public class CacheBlockManager {
                 log.info("fileFromOffset={}, logicalIndex={} is consumed from upLoadQueue", fileFromOffset, logicalIndex);
                 CloudCacheBlock cacheBlock = keyBlockMap.get(ProjectUtil.buildBlockKey(fileFromOffset, logicalIndex));
                 if (cacheBlock == null) {
-                    return;
+                    //对应Block已被回收(如重复任务)，跳过该任务继续消费，而不是退出消费线程
+                    continue;
                 }
                 //上传
                 this.updateBlock(cacheBlock);
