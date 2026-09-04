@@ -40,26 +40,24 @@
         </dependency>
 
         <!-- ================================================================== -->
-        <!-- 以下为内部实现模块：标记 optional，不传递给使用者；                     -->
-        <!-- 由 maven-shade-plugin 在 package 阶段打进本 jar 并重定位到 internal 包。 -->
+        <!-- 内部实现模块：项目内（reactor/IDEA）正常传递，供同项目的测试模块使用。    -->
+        <!-- 对外发布时由 maven-shade-plugin 打进本 jar 并重定位到 internal 包，        -->
+        <!-- 再通过 dependency-reduced-pom 从对外 pom 中移除，不传递给外部使用者。      -->
         <!-- ================================================================== -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-core</artifactId>
             <version>1.0-SNAPSHOT</version>
-            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-wal</artifactId>
             <version>1.0-SNAPSHOT</version>
-            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-metadata</artifactId>
             <version>1.0-SNAPSHOT</version>
-            <optional>true</optional>
         </dependency>
     </dependencies>
 
@@ -102,9 +100,6 @@
                             <goal>shade</goal>
                         </goals>
                         <configuration>
-                            <!-- 不生成 dependency-reduced-pom，保持本模块声明的依赖原样 -->
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <!-- 仅打包内部实现模块；common / AWS SDK 不打包 -->
                             <artifactSet>
                                 <includes>
                                     <include>org.example:s3cloudcache-core</include>
