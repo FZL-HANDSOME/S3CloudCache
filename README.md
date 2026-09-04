@@ -1,3 +1,6 @@
+📖 README Languages
+This README is currently available in Simplified Chinese.
+For the English version, please refer to README.en.md.
 # S3CloudCache
 
 ## 项目背景
