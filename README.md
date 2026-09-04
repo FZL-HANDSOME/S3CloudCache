@@ -54,7 +54,6 @@ S3CloudCache 是一个面向 S3 兼容对象存储的高性能缓存中间件，
 | `s3cloudcache-wal` | WAL 磁盘持久化（mmap 内存映射文件）与崩溃恢复 |
 | `s3cloudcache-metadata` | Block 元数据与三大队列（上传 / 恢复 / 死信） |
 | `s3cloudcache-storage`（对外 artifact：`s3cloudcache-instance`） | 对外 API 与 S3 适配 |
-| `s3cloudcache-test` | 集成测试 / 压测 |
 
 对外只依赖 `s3cloudcache-instance`，内部模块 `core`/`wal`/`metadata` 已通过 shade 打进该 jar 并重定位到 `internal.*` 包，使用者无法也不需要直接引用。
 
