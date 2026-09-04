@@ -359,3 +359,8 @@ reader.ackUpLoadPosition();
 > **Important:** `ackUpLoadPosition()` must only be called after the Block has been successfully uploaded.
 >
 > Otherwise, the upload position will remain stuck and the corresponding WAL file cannot be safely deleted.
+
+
+———————————————————————————————————————
+## As an independent developer and open-source enthusiast, maintaining this project takes up a significant amount of my personal time. If you find this project helpful and would like to buy me a coffee, it would mean the world to me! Every contribution, no matter how small, is deeply appreciated and will be remembered. I'm committed to keeping this project alive and making it even better over time.
+<img width="400" height="556" alt="image" src="https://github.com/user-attachments/assets/6b42a3ff-4923-4566-b26e-7dbd1a656dfe" />
