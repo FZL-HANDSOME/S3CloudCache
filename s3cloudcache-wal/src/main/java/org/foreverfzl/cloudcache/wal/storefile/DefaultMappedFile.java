@@ -341,6 +341,13 @@ public class DefaultMappedFile extends AbstractMappedFile {
         try {
             while (true) {
                 currentPos = WROTE_POSITION_UPDATER.get(this);
+                // 文件已写满（wrotePosition 已到达 fileSize，通常是最后一块被封口后指针被推到边界）。
+                // 此时本文件已无空间，必须直接返回 END_OF_FILE 让上层切换到新文件重试；
+                // 否则会把 wrotePosition 继续推到 fileSize 之外，造成越界写或 "File is closed"。
+                if (currentPos >= this.fileSize) {
+                    close();
+                    return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                }
                 newPos = currentPos + msgSize;
                 logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
                 // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
@@ -444,10 +451,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
      */
     private AppendMessageResult doAppend(final long writeOffset, final long size, final DataStruct dataStruct) {
         try {
-            if (!isAvailable()) {
-                throw new WalException("File is closed");
-            }
-            //创建一个新的 MemorySegment 视图，共享同一块底层内存，仅调整起始地址和长度，不复制数据。
+            // 注意：这里不再检查 isAvailable()。
+            // appendData 开头已检查过 isAvailable()，且当前线程通过 hold() 持有引用，
+            // mmap 在 refCount 归零前不会被清理；写指针也由 CAS 保证 <= fileSize。
+            // 若这里再检查，会出现“文件刚好切走导致在途线程写入失败(File is closed)”的竞态。
             MemorySegment targetSlice = mappedMemorySegment.asSlice(writeOffset, size);
             //将数据写入到targetSlice中
             dataStruct.writeTo(targetSlice);

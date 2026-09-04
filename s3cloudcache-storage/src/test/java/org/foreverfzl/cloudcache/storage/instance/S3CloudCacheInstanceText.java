@@ -48,9 +48,13 @@ public class S3CloudCacheInstanceText {
 
     public static void main(String[] args) throws Exception {
 //        text();
-//        highConcurrencyTest();
-//        dataIntegrityTest();
-//        offHeapDataIntegrityTest();
+        //高并发测试
+        highConcurrencyTest();
+        //串行数据校验测试
+        dataIntegrityTest();
+        //堆外内存测试
+        offHeapDataIntegrityTest();
+//        中等并发大数据量测试
         Medium_concurrency_large_data_volume_test();
     }
 
