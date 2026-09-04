@@ -41,7 +41,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
     public volatile boolean posActive; //该属性决定所有的指针是否可以更新
     public volatile long fileFromOffset;
-    //这些读写指针等都是基于filesize从0位置开始的
+    //文件分为两部分【元数据区域】【数据区域】
+    //wrotePosition、readPosition、upLoadPosition都是针对数据区域的，这些指针为0则代表是元数据区域的0位置(实际位置为元数据区域+指针大小)
     public volatile long wrotePosition; //数据写入位置
     public volatile long readPosition; //可读位置，0~readPosition位置可读,此位置一定是写入到了文件中
     public volatile long upLoadPosition; //该文件上传到云服务器的位置
@@ -70,8 +71,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_UPLOAD_INDEX_UPDATER;
 
     protected volatile int readBlockIndex = 0; //readPosition指针期望下次更新index
-    protected volatile int forceSize = 8 * 1024 * 1024; //每次刷盘大小
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_READ_INDEX_UPDATER;
+    protected static volatile int forceSize = 2 * 1024 * 1024; //每次刷盘大小
 
     //如果该文件的指针更新了该属性会被设置为1，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为0;
     public volatile int metaDirty;
@@ -183,16 +184,24 @@ public class DefaultMappedFile extends AbstractMappedFile {
             int count = (int) ProjectUtil.divideByPower(blockSize, forceSize);
             MemorySegment target = null;
             long curPos = curReadPosition;
-            for (int i = 0; i < count; i++) {
-                target = mappedMemorySegment.asSlice(curPos, forceSize);
-                target.force();
-                curPos += forceSize;
+            boolean isSuccess = true;
+            try {
+                for (int i = 0; i < count; i++) {
+                    target = mappedMemorySegment.asSlice(FileMetaInfo.FILE_META_SIZE + curPos, forceSize);
+                    target.force();
+                    curPos += forceSize;
+                }
+            } catch (Exception e) {
+                isSuccess = false;
+                log.warn("fileName= {} ackReadPosition failed,newReadpos= {}.  ", this.fileFromOffset, expectedNewPosition,e);
             }
             //刷盘成功更新指针
-            READ_POSITION_UPDATER.set(this, expectedNewPosition);
-            NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
-            DIRTY_UPDATER.set(this, 1);
-            log.info("fileName= {} ackReadPosition successfully,newReadpos= {}", this.fileFromOffset, expectedNewPosition);
+            if (isSuccess) {
+                READ_POSITION_UPDATER.set(this, expectedNewPosition);
+                NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
+                DIRTY_UPDATER.set(this, 1);
+                log.info("fileName= {} ackReadPosition successfully,newReadpos= {}", this.fileFromOffset, expectedNewPosition);
+            }
         }
     }
 

@@ -285,6 +285,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                 //物理block写入失败后该CloudCacheBlock会存放在cacheBlockManager的keyBlockMap
                 //然后检查此时该CacheBlock是否有其它线程写入或者上传
                 cacheBlock = cacheBlockManager.getExistingBlock(fileFromOffset, blockIndex);
+                if(cacheBlock==null)continue;
                 int referenceCount = cacheBlock.getReferenceCount();
                 if (referenceCount != 0) {
                     //说明有其它线程正在写入并且上传，将恢复任务重新放入到队列中
@@ -348,7 +349,7 @@ public class BucketWriterWriter extends AbstractBucketWriter {
                     }
                     //调用API正常恢复数据
                     cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, blockIndex, orgData, 0, dataLen), futureContext, false);
-                    blockOffset = blockOffset + DataStruct.HEADER_LENGTH + (dataLen + 3) & ~3;
+                    blockOffset += DataStruct.HEADER_LENGTH + ((dataLen + 3) & ~3);
                     crc.reset();
                 }
             } catch (Exception e) {

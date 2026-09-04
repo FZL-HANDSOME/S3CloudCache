@@ -49,7 +49,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
      * 原子抢占当前Block写入空间
      *
      * @param size 本次需要写入的数据大小
-     * @return 抢到的起始写位置，如果空间不足返回 -1
      */
     public long tryAcquireWritePosition(int size) {
         if (size <= 0) {
@@ -60,10 +59,6 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
         do {
             currentPosition = WROTE_POSITION_UPDATER.get(this);
             nextPosition = currentPosition + size;
-            // Block空间不足
-            if (nextPosition > blockSize) {
-                return -1;
-            }
         } while (!WROTE_POSITION_UPDATER.compareAndSet(this, currentPosition, nextPosition));
         return currentPosition;
     }
@@ -90,6 +85,7 @@ public class CloudCacheBlock extends CacheBlockReferenceResource implements Cach
             BlockMetaDataManager blockMetaDataManager = manager.blockMetaDataManager;
             if (isDelayClean()) {
                 manager.cleanAndRecycleWithLock(this);
+                return;
             }
             if (blockMetaData.isBroken() && !blockMetaData.isBrokenSubmit()) {
                 // bit0=1，bit1=0

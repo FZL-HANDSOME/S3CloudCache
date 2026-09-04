@@ -275,6 +275,7 @@ public class CacheBlockManager {
     }
 
 
+    //该方法只有出现异常的时候才回去调用
     public CloudCacheBlock getBlock(long fileFromOffset, int blockIndex) throws InterruptedException {
         long cacheBlockKey = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
         // 检查是否已经存在与 cacheBlockKey 绑定的 block

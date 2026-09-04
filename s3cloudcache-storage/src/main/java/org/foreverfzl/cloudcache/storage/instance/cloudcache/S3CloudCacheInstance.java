@@ -219,7 +219,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             if (walFiles.isEmpty()) {
                 return;
             }
-            long endFileFromOffset = getFileFromOffset(walFiles.getLast()) + oldFileSize;
+            long endFileFromOffset = getFileFromOffset(walFiles.getLast()) + FileMetaInfo.FILE_META_SIZE + oldFileSize;
             //创建该bucket对应manager
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
             CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
@@ -304,7 +304,7 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                         }
                         blockMetaDataManager.addExpectedBytes(fileFromOffset, blockIndex, valueLen);
                         blockMetaDataManager.addPageCacheBytes(fileFromOffset, blockIndex, valueLen);
-                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, blockIndex, orgData, 0, valueLen), prefix,null,false);
+                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, blockIndex, orgData, 0, valueLen), prefix, null, false);
                         crc32.reset();
                     }
                     //尝试封口

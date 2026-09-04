@@ -226,12 +226,12 @@ public final class ProjectUtil {
 
 
     /**
-     * blockIndex 使用 8 bit（0~255）
+     * blockIndex 使用 10 bit（可表示 0~1023，共 1024 个 Block）
      */
-    private static final int BLOCK_INDEX_BITS = 8;
+    private static final int BLOCK_INDEX_BITS = 10;
 
     /**
-     * blockIndex 掩码
+     * blockIndex 掩码 (0x3FF)
      */
     private static final long BLOCK_INDEX_MASK = (1L << BLOCK_INDEX_BITS) - 1;
 
@@ -239,7 +239,7 @@ public final class ProjectUtil {
      * 生成唯一 BlockKey
      *
      * @param fileFromOffset WAL 文件起始 Offset（即 fileName）
-     * @param blockIndex     Block 编号（0~255）
+     * @param blockIndex     Block 编号（0~1023）
      * @return 唯一 BlockKey
      */
     public static long buildBlockKey(long fileFromOffset, int blockIndex) {

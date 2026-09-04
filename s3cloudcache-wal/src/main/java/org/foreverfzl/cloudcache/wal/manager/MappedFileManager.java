@@ -5,6 +5,7 @@ import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.Util.FileMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
 import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
+import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
 import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudcache.wal.storefile.MappedFiledReferenceResource;
@@ -133,7 +134,7 @@ public class MappedFileManager {
                     break;
                 }
                 // 文件结尾，创建新的文件
-                long nextFileOffset = oldMappedFile.fileFromOffset + oldMappedFile.fileSize;
+                long nextFileOffset = oldMappedFile.fileFromOffset + FileMetaInfo.FILE_META_SIZE + oldMappedFile.fileSize;
                 DefaultMappedFile newFile = synCreateMappedFile(nextFileOffset);
                 if (newFile != null) {
                     activeMappedFile.compareAndSet(oldMappedFile, newFile);
@@ -446,7 +447,7 @@ public class MappedFileManager {
         }
     }
 
-    public void stopAllThread(){
+    public void stopAllThread() {
         chackMappedFileThread.interrupt();
         fileMetaFlushThread.interrupt();
         flushFileReadPositionThread.interrupt();

@@ -50,7 +50,8 @@ public class S3CloudCacheInstanceText {
 //        text();
 //        highConcurrencyTest();
 //        dataIntegrityTest();
-        offHeapDataIntegrityTest();
+//        offHeapDataIntegrityTest();
+        Medium_concurrency_large_data_volume_test();
     }
 
 
@@ -91,6 +92,228 @@ public class S3CloudCacheInstanceText {
         }
 
         textInstance.close(15000, 15000, 15000);
+    }
+
+
+    // ========================================================================
+    // 中等并发 + 大数据量测试（触发文件切换）
+    // 配置：walFileSize=16MB, blockSize=2MB(TINY)
+    // 写入：8 线程 × 1000 条 × 4KB ≈ 32MB，跨越 2 个 WAL 文件（必然触发文件切换）
+    // 校验：写阶段零失败 + 数量精确；回读阶段逐字节比对（Range GET），一字不差才算通过
+    // ========================================================================
+    public static void Medium_concurrency_large_data_volume_test() throws Exception {
+        S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
+        BucketConfig defaultBucketConfig = new BucketConfig();
+        defaultBucketConfig
+                .setBlockSize(BlockSizeLevel.TINY.getBytes())          // 2MB
+                .setCacheSize(64 * 1024 * 1024L)                       // 64MB，块池 32 个，足够容纳 16 个数据块
+                .setBlockUpLoadCount(BlockUploadConcurrencyLevel.NORMAL.getConcurrency())
+                .setS3KeyPrefix(S3_KEY_PREFIX)
+                .setLockMappedFilePageCache(false)
+                .setWarmWalFile(false)
+                .setWalFileSize(16 * 1024 * 1024L);                    // 16MB，触发文件切换
+        S3CloudCacheConfig config = new S3CloudCacheConfig("textinstance-medium", null, defaultBucketConfig);
+        config.blockMaxIdleTime = 10000;
+        S3CloudCacheInstance instance = new S3CloudCacheInstance(instanceClient, config);
+        instance.start();
+        BucketWriterWriter writer = instance.getBucketWriterInstance(BUCKET_NAME);
+
+        int threadCount = 8;          // 中等并发
+        int writesPerThread = 1000;
+        int total = threadCount * writesPerThread;   // 8000
+        int recordSize = 4096;        // 每条 4KB
+        // 总数据量 ≈ 8000 × 4KB = 32MB > 16MB，必然触发至少一次文件切换
+
+        CountDownLatch writeLatch = new CountDownLatch(total);
+        LongAdder writeSuccessCount = new LongAdder();
+        LongAdder writeFailCount = new LongAdder();
+        CopyOnWriteArrayList<Object[]> verifyPairs = new CopyOnWriteArrayList<>();
+        CopyOnWriteArrayList<String> writeErrors = new CopyOnWriteArrayList<>();
+
+        ExecutorService writeExecutor = Executors.newFixedThreadPool(threadCount);
+        log.info("[中等并发大数据量测试] ===== 阶段一：并发写入 =====");
+        log.info("[中等并发大数据量测试] 线程数={}, 每线程={}, 合计={}, 单条={}B, 总数据≈{}MB",
+                threadCount, writesPerThread, total, recordSize, (long) total * recordSize / 1024 / 1024);
+
+        boolean writeCompleted;
+        try {
+            for (int t = 0; t < threadCount; t++) {
+                int threadId = t;
+                writeExecutor.submit(() -> {
+                    for (int s = 0; s < writesPerThread; s++) {
+                        byte[] original = buildMediumRecord(threadId, s, recordSize);
+                        try {
+                            CompletableFuture<WriteResult> future = writer.writeHeapData(original);
+                            int seq = s;
+                            future.whenComplete((res, thr) -> {
+                                if (thr != null) {
+                                    writeErrors.add("Future异常 thread=" + threadId + " seq=" + seq
+                                            + " err=" + thr.getMessage());
+                                    writeFailCount.increment();
+                                } else if (res == null || !res.isSuccess()) {
+                                    writeErrors.add("写入失败 thread=" + threadId + " seq=" + seq + " result=" + res);
+                                    writeFailCount.increment();
+                                } else {
+                                    verifyPairs.add(new Object[]{original, res});
+                                    writeSuccessCount.increment();
+                                }
+                                writeLatch.countDown();
+                            });
+                        } catch (Exception e) {
+                            writeErrors.add("write()异常 thread=" + threadId + " seq=" + s + " err=" + e.getMessage());
+                            writeFailCount.increment();
+                            writeLatch.countDown();
+                        }
+                    }
+                });
+            }
+
+            writeCompleted = writeLatch.await(600, TimeUnit.SECONDS);
+
+            log.info("[中等并发大数据量测试] 阶段一结束：成功={}, 失败={}, latch超时={}",
+                    writeSuccessCount.sum(), writeFailCount.sum(), !writeCompleted);
+            if (!writeErrors.isEmpty()) {
+                log.error("[中等并发大数据量测试] 写入阶段共 {} 个错误，前10条：", writeErrors.size());
+                writeErrors.stream().limit(10).forEach(e -> log.error("  WRITE-ERR: {}", e));
+            }
+
+            if (!writeCompleted) {
+                fail("[中等并发大数据量测试] 写入阶段超时：仍有 " + writeLatch.getCount() + " 条 Future 未完成");
+            }
+            if (!writeErrors.isEmpty() || writeFailCount.sum() != 0) {
+                fail("[中等并发大数据量测试] 写入阶段存在失败：失败数=" + writeFailCount.sum()
+                        + ", 错误条数=" + writeErrors.size());
+            }
+            if (writeSuccessCount.sum() != total || verifyPairs.size() != total) {
+                fail("[中等并发大数据量测试] 写入成功数不匹配：期望=" + total
+                        + ", 成功计数=" + writeSuccessCount.sum() + ", 收集对=" + verifyPairs.size());
+            }
+        } finally {
+            writeExecutor.shutdownNow();
+            log.info("[中等并发大数据量测试] 正在关闭 instance，等待全部 Block 上传至 S3...");
+            try {
+                instance.close(60000, 60000, 60000);
+            } catch (Exception closeEx) {
+                log.error("[中等并发大数据量测试] instance.close() 失败", closeEx);
+            }
+        }
+        log.info("[中等并发大数据量测试] instance 已关闭，共 {} 条记录待校验", verifyPairs.size());
+
+        // ===== 阶段二：S3 回读逐字节校验 =====
+        log.info("[中等并发大数据量测试] ===== 阶段二：S3 回读校验 =====");
+        S3Client verifyClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
+        int verifyThreadCount = Math.min(32, Runtime.getRuntime().availableProcessors() * 2);
+        ExecutorService verifyExecutor = Executors.newFixedThreadPool(verifyThreadCount);
+        CountDownLatch verifyLatch = new CountDownLatch(verifyPairs.size());
+        LongAdder verifyPass = new LongAdder();
+        LongAdder verifyFail = new LongAdder();
+        CopyOnWriteArrayList<String> verifyErrors = new CopyOnWriteArrayList<>();
+
+        boolean verifyCompleted;
+        try {
+            for (Object[] pair : verifyPairs) {
+                byte[] original = (byte[]) pair[0];
+                WriteResult wr = (WriteResult) pair[1];
+                verifyExecutor.submit(() -> {
+                    try {
+                        String s3Key = wr.getS3Key();
+                        long offset = wr.getOffset();
+                        int size = wr.getSize();
+
+                        if (size != original.length) {
+                            if (verifyErrors.size() < 50) {
+                                verifyErrors.add("size不匹配 s3Key=" + s3Key + " offset=" + offset
+                                        + " expectedLen=" + original.length + " size=" + size);
+                            }
+                            verifyFail.increment();
+                            return;
+                        }
+
+                        String range = "bytes=" + offset + "-" + (offset + size - 1);
+                        GetObjectRequest getReq = GetObjectRequest.builder()
+                                .bucket(BUCKET_NAME)
+                                .key(s3Key)
+                                .range(range)
+                                .build();
+
+                        try (ResponseInputStream<GetObjectResponse> stream = verifyClient.getObject(getReq)) {
+                            byte[] readBack = stream.readAllBytes();
+                            if (Arrays.equals(original, readBack)) {
+                                verifyPass.increment();
+                            } else {
+                                int diffPos = -1;
+                                int cmpLen = Math.min(original.length, readBack.length);
+                                for (int k = 0; k < cmpLen; k++) {
+                                    if (original[k] != readBack[k]) {
+                                        diffPos = k;
+                                        break;
+                                    }
+                                }
+                                if (verifyErrors.size() < 50) {
+                                    verifyErrors.add("FAIL s3Key=" + s3Key + " offset=" + offset + " size=" + size
+                                            + " readBackLen=" + readBack.length
+                                            + (diffPos >= 0 ? " 首差异位=" + diffPos : " 长度不一致"));
+                                }
+                                verifyFail.increment();
+                            }
+                        }
+                    } catch (IOException e) {
+                        if (verifyErrors.size() < 50) {
+                            verifyErrors.add("S3读取异常 s3Key=" + wr.getS3Key() + " offset=" + wr.getOffset()
+                                    + " err=" + e.getMessage());
+                        }
+                        verifyFail.increment();
+                    } catch (Exception e) {
+                        if (verifyErrors.size() < 50) {
+                            verifyErrors.add("校验异常 s3Key=" + wr.getS3Key() + " err=" + e.getMessage());
+                        }
+                        verifyFail.increment();
+                    } finally {
+                        verifyLatch.countDown();
+                    }
+                });
+            }
+
+            verifyCompleted = verifyLatch.await(600, TimeUnit.SECONDS);
+
+            log.info("[中等并发大数据量测试] ===== 最终汇总 =====");
+            log.info("[中等并发大数据量测试] 阶段一写入：总计={}, 成功={}, 失败={}",
+                    total, writeSuccessCount.sum(), writeFailCount.sum());
+            log.info("[中等并发大数据量测试] 阶段二校验：待校验={}, PASS={}, FAIL={}, latch超时={}",
+                    verifyPairs.size(), verifyPass.sum(), verifyFail.sum(), !verifyCompleted);
+            if (!verifyErrors.isEmpty()) {
+                log.error("[中等并发大数据量测试] 检测到 {} 条数据不一致（最多展示前50条）：", verifyErrors.size());
+                verifyErrors.forEach(e -> log.error("  DATA-ERR: {}", e));
+            }
+
+            if (!verifyCompleted) {
+                fail("[中等并发大数据量测试] 回读校验超时：仍有 " + verifyLatch.getCount() + " 条未校验完成");
+            }
+            if (verifyFail.sum() != 0) {
+                fail("[中等并发大数据量测试] 回读校验失败：FAIL=" + verifyFail.sum());
+            }
+            if (verifyPass.sum() != total) {
+                fail("[中等并发大数据量测试] 回读校验 PASS 数不匹配：期望=" + total + ", 实际=" + verifyPass.sum());
+            }
+
+            log.info("[中等并发大数据量测试] ✓ ALL PASSED：所有数据写入成功且与 S3 读回完全一致");
+        } finally {
+            verifyExecutor.shutdownNow();
+            verifyClient.close();
+        }
+    }
+
+    /**
+     * 构造一条确定性、可定位的固定长度记录，确保每条数据唯一且可回读逐字节比对。
+     */
+    private static byte[] buildMediumRecord(int threadId, int seq, int recordSize) {
+        byte[] record = new byte[recordSize];
+        byte[] header = ("MED-" + threadId + "-" + seq + ":").getBytes(StandardCharsets.UTF_8);
+        System.arraycopy(header, 0, record, 0, Math.min(header.length, recordSize));
+        for (int i = header.length; i < recordSize; i++) {
+            record[i] = (byte) ((threadId * 131 + seq * 17 + i) & 0xFF);
+        }
+        return record;
     }
 
 
@@ -278,8 +501,8 @@ public class S3CloudCacheInstanceText {
                                                     + " readBackLen=" + readBack.length
                                                     + (diffPos >= 0
                                                     ? " 首差异位=" + diffPos
-                                                    + " 期望=0x" + Integer.toHexString(original[diffPos] & 0xFF)
-                                                    + " 实际=0x" + Integer.toHexString(readBack[diffPos] & 0xFF)
+                                                      + " 期望=0x" + Integer.toHexString(original[diffPos] & 0xFF)
+                                                      + " 实际=0x" + Integer.toHexString(readBack[diffPos] & 0xFF)
                                                     : " 长度不一致"));
                                 }
                                 verifyFail.increment();
