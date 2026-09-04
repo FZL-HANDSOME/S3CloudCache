@@ -329,6 +329,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
         // 2. CAS 自旋抢占 wrotePosition，为当前线程分配写入区域
         long currentPos;
         long newPos;
+        long remainingInBlock;
         //采用空间预留 解耦物理和逻辑Block，先分配逻辑Block，然后将逻辑Block信息放入到AppendMessageResult中
         //logicalIndex算出该数据在哪个逻辑Block中，divideByPower(newPos,blockSize)等价于 newPos/blockSize
         int logicalIndex = -1;
@@ -352,7 +353,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
                 // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
                 blockOffset = currentPos & (this.blockSize - 1);
-                long remainingInBlock = this.blockSize - blockOffset;
+                remainingInBlock = this.blockSize - blockOffset;
                 long paddingPos;
                 if (msgSize > remainingInBlock) {
                     // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
@@ -426,6 +427,23 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 result.setBlockOffset(blockOffset);
                 //写入成功，增加写入到PageCache字节数
                 blockMetaData = blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize);
+                // 本次写入恰好填满当前 Block（blockOffset + msgSize == blockSize）。
+                // 这种情况不会触发上面的“跨 Block 封口”逻辑，必须在这里主动封口，
+                // 否则该 Block 永远停留在 OPEN 状态，数据永远不会被上传（静默丢数据）。
+                if (remainingInBlock==msgSize) {
+                    int sealResult = blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex);
+                    if ((sealResult & 1) == 1) {
+                        setBlockStateArrayFinishedPageCache(logicalIndex);
+                    }
+                    if ((sealResult & (1 << 1)) == (1 << 1)) {
+                        blockMetaDataManager.setTaskToUpdateQueue(this.fileFromOffset, logicalIndex);
+                    }
+                    if ((sealResult & (1 << 2)) == (1 << 2)) {
+                        blockMetaDataManager.setTaskToRecoverQueue(
+                                blockMetaDataManager.getBlockMetaData(this.fileFromOffset, logicalIndex),
+                                this.fileFromOffset, logicalIndex);
+                    }
+                }
             }
         } finally {
             int release = this.release();

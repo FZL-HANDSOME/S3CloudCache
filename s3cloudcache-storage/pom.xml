@@ -18,30 +18,97 @@
     </properties>
 
     <dependencies>
-
+        <!-- 公共 API：配置(S3CloudCacheConfig/BucketConfig)、WriteResult、枚举等，对使用者可见 -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-common</artifactId>
             <version>1.0-SNAPSHOT</version>
         </dependency>
 
+        <!-- AWS S3 SDK：公共 API 需要 S3Client，对使用者可见 -->
         <dependency>
-            <groupId>org.example</groupId>
-            <artifactId>s3cloudcache-core</artifactId>
-            <version>1.0-SNAPSHOT</version>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <version>2.25.53</version>
         </dependency>
 
-        <dependency>
-            <groupId>org.example</groupId>
-            <artifactId>s3cloudcache-wal</artifactId>
-            <version>1.0-SNAPSHOT</version>
-        </dependency>
-
+        <!-- 默认 HTTP 客户端：S3ClientFactory 内部构建 S3Client 需要，运行时可见 -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>url-connection-client</artifactId>
             <version>2.25.53</version>
         </dependency>
+
+        <!-- ================================================================== -->
+        <!-- 以下为内部实现模块：标记 optional，不传递给使用者；                     -->
+        <!-- 由 maven-shade-plugin 在 package 阶段打进本 jar 并重定位到 internal 包。 -->
+        <!-- ================================================================== -->
+        <dependency>
+            <groupId>org.example</groupId>
+            <artifactId>s3cloudcache-core</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.example</groupId>
+            <artifactId>s3cloudcache-wal</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.example</groupId>
+            <artifactId>s3cloudcache-metadata</artifactId>
+            <version>1.0-SNAPSHOT</version>
+            <optional>true</optional>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 将内部实现模块(core/wal/metadata)打进 s3cloudcache-instance 的 jar，
+                 并重定位到 org.foreverfzl.cloudcache.internal.* 包，实现对外黑盒。
+                 公共 API(common) 与 AWS SDK 保持外部依赖，不打进 jar。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <!-- 不生成 dependency-reduced-pom，保持本模块声明的依赖原样 -->
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <!-- 仅打包内部实现模块；common / AWS SDK 不打包 -->
+                            <artifactSet>
+                                <includes>
+                                    <include>org.example:s3cloudcache-core</include>
+                                    <include>org.example:s3cloudcache-wal</include>
+                                    <include>org.example:s3cloudcache-metadata</include>
+                                </includes>
+                            </artifactSet>
+                            <!-- 内部实现包重定位，避免使用者直接引用 -->
+                            <relocations>
+                                <relocation>
+                                    <pattern>org.foreverfzl.cloudcache.core</pattern>
+                                    <shadedPattern>org.foreverfzl.cloudcache.internal.core</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>org.foreverfzl.cloudcache.wal</pattern>
+                                    <shadedPattern>org.foreverfzl.cloudcache.internal.wal</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>org.foreverfzl.cloudcache.metadata</pattern>
+                                    <shadedPattern>org.foreverfzl.cloudcache.internal.metadata</shadedPattern>
+                                </relocation>
+                            </relocations>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

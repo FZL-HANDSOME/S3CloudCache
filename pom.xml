@@ -44,6 +44,8 @@
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>1.4.8</version>
+            <!-- 日志实现不强制传递给使用者：由使用方自己选择 SLF4J 绑定 -->
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 
