@@ -23,7 +23,6 @@ This effectively transforms **a large number of small PUT requests into a small 
 | `s3cloudcache-wal`                                                | WAL persistence using memory-mapped files and crash recovery                |
 | `s3cloudcache-metadata`                                           | Block metadata and the three major queues (upload / recovery / dead-letter) |
 | `s3cloudcache-storage` (public artifact: `s3cloudcache-instance`) | Public APIs and S3 adapter                                                  |
-| `s3cloudcache-test`                                               | Integration tests and performance benchmarks                                |
 
 Only `s3cloudcache-instance` is exposed to users.
 
