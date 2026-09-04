@@ -23,7 +23,7 @@ public class BucketConfig {
     public Long cacheSize = CacheSizeLevel.TINE.getBytes();
 
     /**
-     * Block的大小，默认为8MB
+     * Block的大小，默认为4MB
      */
     public Integer blockSize = BlockSizeLevel.SMALL.getBytes();
 
