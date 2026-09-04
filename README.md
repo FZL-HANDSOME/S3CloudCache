@@ -337,5 +337,9 @@ while (reader.hasNext()) {
 // 你手动上传成功后，务必确认，否则上传位点会卡住、WAL 文件无法删除
 reader.ackUpLoadPosition();
 ```
-
 > 注意：`ackUpLoadPosition()` 必须在上传成功后调用，否则该文件的删除逻辑会一直等待。
+
+
+———————————————————————————————————————
+## 作为一名独立开发者/开源爱好者，维护这个项目会占用大量的休息时间。如果你觉得这个项目对你有帮助，并且愿意请我喝杯咖啡，那将是对我极大的鼓励！打赏无论多少，我都将铭记于心。我也承诺会持续维护下去，让项目变得更好。
+<img width="400" height="556" alt="image" src="https://github.com/user-attachments/assets/6b42a3ff-4923-4566-b26e-7dbd1a656dfe" />
