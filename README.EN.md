@@ -80,7 +80,7 @@ A Block is sealed and scheduled for upload when any of the following conditions 
 
 # Usage
 
-## 1. Add Dependency
+## 1. Add Dependency（This dependency requires you to download the project and build it yourself.）
 
 ```xml
 <dependency>
