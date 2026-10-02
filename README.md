@@ -91,7 +91,7 @@ S3CloudCache 是一个面向 S3 兼容对象存储的高性能缓存中间件，
 
 | 场景 | 处理 |
 |------|------|
-| 进程崩溃 / 宕机 | 重启时 `start()` 扫描 WAL 文件与 `bucketMeta`，恢复 `[upLoadPosition, readPosition)` 区间内未上传的数据并重新上传 |
+| 进程崩溃 / 宕机 | 重启时 `start()` 扫描 WAL，跳过已持久化上传确认的 Block；校验未确认 Block 的完整记录后恢复，损坏数据保留等待处理 |
 | 物理 Block 写入失败 | 该 Block 标记 broken，后台线程从 WAL 重读该 Block 的原始数据并重写（恢复队列） |
 | 上传失败（重试 3 次仍失败） | 进入死信队列，由用户通过 `getUpLoadFailedBlockInfo()` 读取并自愈 |
 | 单条数据大于 blockSize | 直接拒绝并返回失败（`WriteResult.isSuccess() == false`） |
@@ -281,10 +281,11 @@ public class WriteResult {
 
 **语义说明**：
 
-- `isSuccess() == true`：数据已成功写入 WAL 和堆外物理 Block，且所在 Block 已封口、即将（或正在）异步上传到 S3。
-- `isSuccess() == false`：写入失败（例如 WAL 写入失败、单条数据超过 blockSize 等）。
+- `isSuccess() == true`：所在 Block 已成功上传到 S3，且本地上传确认已持久化；此时返回的 `s3Key + offset + size` 才是已提交位置。
+- `isSuccess() == false` 或 Future 异常完成：写入未被确认成功。上传失败时保留未确认 WAL，供重启或人工恢复；这不表示远端一定不存在对象。
 - 一个 `s3Key` 对应一个 Block；同一 Block 内的多条数据共享同一个 `s3Key`，用 `offset` 区分。
-- 上传是异步的。若要确保数据**已经**落到 S3 再查询，请先调用 `instance.close(...)`（它会等全部上传完成），或自行轮询重试。
+- 上传是异步的，但 Future 的成功完成会等待上传确认；尾块可能需要等空闲封口或 `instance.close(...)`，不要在提交每条记录后立即等待它完成来做吞吐测试。
+- Block 是最小提交单位。未确认 Block 在恢复时可以重排，已确认 Block 不再按 WAL 顺序重建覆盖。
 - 只要该s3Key有一个数据isSuccess==false则整个block中的数据作废，因为该项目是以block为基础单位的。
 
 ## 6. 如何用返回内容查询数据
@@ -320,26 +321,49 @@ try (ResponseInputStream<GetObjectResponse> stream = s3Client.getObject(req)) {
 ```java
 BucketWriterWriter writer = instance.getBucketWriterInstance("my-bucket");
 
-// 阻塞读取一条上传失败的数据
-MappedFileReader reader = writer.getUpLoadFailedBlockInfo();
-
-System.out.println("失败的 bucket  = " + reader.getBucketName());
-System.out.println("失败的 s3Key   = " + reader.getS3Key());
-System.out.println("失败的逻辑块号 = " + reader.getLogicalIndex());
-
-// 方式一：拿到整个 Block 的内存视图，自行上传
-MemorySegment segment = reader.getMemorySegment();
-
-// 方式二：按记录逐条读取（hasNext/next）
-while (reader.hasNext()) {
-    byte[] record = reader.next();
-    // ...
+// 阻塞取得失败块的独立快照；必须关闭 Reader，释放它拥有的堆外内存。
+try (MappedFileReader reader = writer.getUpLoadFailedBlockInfo()) {
+    // readAll 是整块所有 Value Bytes，不含 WAL 协议头、对齐字节或尾部填充。
+    MemorySegment values = reader.readAll();
+    var response = instance.s3RawPutObject(reader.getBucketName(), reader.getS3Key(), values);
+    if (response.eTag() == null || response.eTag().isBlank()) {
+        throw new IllegalStateException("上传结果未通过确认，不推进 WAL 位点");
+    }
+    reader.ackUpLoadPosition(); // 仅上传成功后确认；Reader.close() 不会自动确认。
 }
-
-// 你手动上传成功后，务必确认，否则上传位点会卡住、WAL 文件无法删除
-reader.ackUpLoadPosition();
 ```
 > 注意：`ackUpLoadPosition()` 必须在上传成功后调用，否则该文件的删除逻辑会一直等待。
+> `hasNext()/next()` 可逐条读 Value；`readAll()` 不受当前游标影响，每次都表示整块。`getMemorySegment()` 是包含协议头的原始只读快照，不能把它当作纯 Value 对象上传。所有返回的堆外视图只在 Reader 关闭前有效；人工确认须在 Instance 关闭前完成。损坏或未完整写入的块会抛异常，不返回有效前缀冒充整块。
+
+## 8. 数据完整性回归与升级边界
+
+使用 JDK 25 或更高版本，在项目根目录运行 `mvn test`（依赖已缓存时可用 `mvn -o test`）。
+`IntegrityRegressionTest` 调用 `S3CloudCacheInstanceText` 中的离线故障测试，配合 WAL 模块测试，验证并发写入、堆内/堆外切片、尾块关闭、上传失败与重启、失败物理块恢复以及已确认位置不被覆盖。测试使用独立临时目录和内存 S3 模拟器，不访问原有 WAL 或真实服务器；按记录 ID、长度、返回位置和逐字节内容核对。
+
+- WAL 头部预留区增加逐块上传确认，Bucket 目录增加带校验的 `next-file-offset`；不要单独删除该编号文件，否则无法保证后续 Key 不复用。
+- 旧版本没有逐块确认，无法识别旧连续上传位点之后已上传的块；旧目录如果 WAL 已清空且没有编号文件，也无法推断历史编号。升级前应先处理旧未完成任务，并为无法确定历史编号的目录使用新的实例名或 Key 前缀。
+- 未完成 WAL 的 Block 大小、文件大小或 Key 前缀发生变化时，恢复拒绝继续；先用原配置恢复完成再调整配置。
+- 损坏 WAL 不上传有效前缀冒充整块，也不静默删除；需要修复或人工处理。离线回归不等于真实 S3、进程强杀或机器断电验证，生产部署仍需补充这些测试。
+- 新建 `bucketMeta` 使用 V2 标记及完整字段 CRC，支持 2 GiB 及更大文件尺寸。相同配置的旧元数据仍按旧格式读取且不原地升级；V2 不支持直接交给旧程序降级读取，降级前应先排空并备份。CRC 错误、短文件、未知版本都会拒绝启动，不再当作“没有数据”。
+
+## 9. 维护约束与本轮修复定位
+
+| 位置 | 原问题与现在的约束 | 回归测试 |
+| --- | --- | --- |
+| `BlockMetaData.notifyFutures` | `complete()` 会同步执行用户回调；串行通知会让 A 等 B 卡住，上传线程中的 close 也会等自身。现在锁内快照结果、锁外每个 Future 独立虚拟线程通知。 | `FutureNotificationRegressionTest` |
+| `S3CloudCacheConfig` / `BucketConfig` | 原配置可变且浅共享。实例在任何目录/线程/内存分配之前深拷贝、校验默认及特殊配置。运行中修改调用方配置不再热更新现有实例。 | `ConfigurationSafetyTest` |
+| `S3CloudCacheInstance.InstanceDirectoryLock` | 同目录多个实例会并发恢复/写相同 WAL。构造时取得 OS 独占锁，全部资源关闭后释放；关闭超时保留锁供重试，锁文件不删除。 | `InstanceDirectoryLockTest`，含独立 JVM 检查 |
+| `BucketMetaInfo` / `BucketMetaInfoUtil` | 旧 CRC 只覆盖数值低 8 位，且 2 GiB 转 int 溢出。新建 V2 校验完整 4+8+4 字节字段及前缀；旧格式兼容。相同配置重开不截断，允许的配置替换通过临时文件 force 后原子替换。 | `BucketMetaInfoCompatibilityTest` |
+| `MappedFileReader` / `WalBlockReader` | 原人工读取没有完整 CRC/长度验证，原始映射也可能在确认后被卸载。现在用只读独立快照和共用整块解析，校验实际字节数与 expectedBytes，显式释放内存。 | `ManualRecoveryReaderTest` |
+| `BlockMetaDataManager.deleteFileAllBlockMetaData` | 恢复跳过已上传块后索引可能不连续。文件清理遍历完整 10-bit 索引范围，不能碰到第一个缺失索引就返回。 | `BlockMetadataCleanupTest` |
+
+维护时尤其不要破坏以下约束：
+
+1. `Future` 成功仍然意味着 S3 已确认；结果通知与用户回调执行是另一层。不要让上传/恢复线程等待用户回调，也不要依赖回调顺序或回调线程身份。`close()` 等存储任务结束，不等待用户回调全部结束。
+2. `expectedBytes` 表示 WAL 已接受的数据量，不等同于“当前已经复制完的数据量”。人工恢复不能把尚未写完的全零尾部当成完整块；确认前块必须停止接收新数据。
+3. `.instance.lock` 保护同一本地实例目录，不是分布式 S3 键空间锁。不同目录/机器仍应使用唯一实例名或 Key 命名空间；不要手工删除运行中的锁文件。
+4. V2 首个 int 为 `0x424D0200 | dirty`。改变 dirty 时保留版本位；配置 CRC 不包含可变 dirty。旧文件的低 8 位 CRC 仅为兼容保留，不具备 V2 的完整字段保护。
+5. `MappedFileReader.close()` 只释放快照；`ackUpLoadPosition()` 才确认 WAL。二者不能合并，上传失败、读取失败或用户取消时必须保留未确认数据。
 
 
 ———————————————————————————————————————

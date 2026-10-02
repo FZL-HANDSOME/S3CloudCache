@@ -11,13 +11,18 @@ import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudcache.wal.storefile.MappedFiledReferenceResource;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.config.BucketConfig;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
@@ -26,6 +31,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32;
 
 
 /**
@@ -52,6 +58,8 @@ public class MappedFileManager {
     public final BucketConfig config;
     //WAL持久化文件地址
     private final String WAL_FILE_PATH;
+    private final Path nextFileOffsetPath;
+    private long reservedNextFileOffset;
 
     //文件水位线，活跃文件超过这个水位线会分配新的线程去创建新的文件
     public final long fileWaterMark;
@@ -87,6 +95,8 @@ public class MappedFileManager {
         this.dirPath = dirPath;
         this.config = config;
         this.WAL_FILE_PATH = dirPath + File.separator + "wal";
+        this.nextFileOffsetPath = Path.of(dirPath, "next-file-offset");
+        this.reservedNextFileOffset = readNextFileOffset();
         this.fileWaterMark = (long) (config.walFileSize * 0.7);
         this.blockMetaDataManager = new BlockMetaDataManager();
         this.bucketMetaFileArena = Arena.ofShared();
@@ -96,18 +106,18 @@ public class MappedFileManager {
         this.flushFileMetaTime = config.flushFileMetaInfoTime;
         this.fileMetaFlushThread = new Thread(this::flushFileMeta);
         this.flushFileReadPositionThread = new Thread(this::flushReadPositionTask);
-        init(fromOffset);
+        init(Math.max(fromOffset, reservedNextFileOffset));
     }
 
 
     //启动线程，创建初始文件等
     private void init(long fromOffset) {
-        chackMappedFileThread.start();
-        fileMetaFlushThread.start();
-        flushFileReadPositionThread.start();
         //刚开始的时候一个文件也没有，因此我们必须初始化一个文件
         DefaultMappedFile startFile = synCreateMappedFile(fromOffset);
         activeMappedFile.compareAndSet(null, startFile);
+        chackMappedFileThread.start();
+        fileMetaFlushThread.start();
+        flushFileReadPositionThread.start();
     }
 
 
@@ -221,6 +231,8 @@ public class MappedFileManager {
                 if (defaultMappedFile != null) {
                     return defaultMappedFile;
                 }
+                // 先持久化编号预留，再创建文件。即使随后崩溃，也只会跳号而不会重用已上传对象的 Key。
+                reserveNextFileOffset(Math.addExact(fileFromOffset, Math.addExact(FileMetaInfo.FILE_META_SIZE, walFileSize)));
                 DefaultMappedFile newFile = DefaultMappedFile.createFile(WAL_FILE_PATH, fileName, fileFromOffset, walFileSize,
                         blockSize, isWarm, isLock, this);
                 mappedFiles.put(fileFromOffset, newFile);
@@ -230,6 +242,50 @@ public class MappedFileManager {
                         e, instanceName, bucketName, fileName);
                 throw e;
             }
+        }
+    }
+
+    private long readNextFileOffset() {
+        if (!Files.exists(nextFileOffsetPath)) return 0;
+        try (FileChannel channel = FileChannel.open(nextFileOffsetPath, StandardOpenOption.READ)) {
+            if (channel.size() != 16) throw new WalException("Invalid WAL sequence file: " + nextFileOffsetPath);
+            ByteBuffer bytes = ByteBuffer.allocate(16);
+            while (bytes.hasRemaining()) {
+                if (channel.read(bytes) < 0) throw new WalException("Truncated WAL sequence file: " + nextFileOffsetPath);
+            }
+            bytes.flip();
+            long nextOffset = bytes.getLong();
+            long expectedCrc = bytes.getLong();
+            CRC32 crc = new CRC32();
+            crc.update(bytes.array(), 0, Long.BYTES);
+            if (nextOffset < 0 || expectedCrc != crc.getValue()) {
+                throw new WalException("Corrupt WAL sequence file: " + nextFileOffsetPath);
+            }
+            return nextOffset;
+        } catch (java.io.IOException e) {
+            throw new WalException("Cannot read WAL sequence file: " + nextFileOffsetPath, e);
+        }
+    }
+
+    private synchronized void reserveNextFileOffset(long nextOffset) {
+        if (nextOffset <= reservedNextFileOffset) return;
+        ByteBuffer bytes = ByteBuffer.allocate(16);
+        bytes.putLong(nextOffset);
+        CRC32 crc = new CRC32();
+        crc.update(bytes.array(), 0, Long.BYTES);
+        bytes.putLong(crc.getValue()).flip();
+        try {
+            Files.createDirectories(nextFileOffsetPath.getParent());
+            try (FileChannel channel = FileChannel.open(nextFileOffsetPath,
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                while (bytes.hasRemaining()) channel.write(bytes);
+                channel.truncate(16);
+                channel.force(true);
+            }
+            reservedNextFileOffset = nextOffset;
+        } catch (java.io.IOException e) {
+            // 不允许以默认编号继续写，否则可能覆盖历史 S3 对象。
+            throw new WalException("Cannot persist WAL sequence file: " + nextFileOffsetPath, e);
         }
     }
 
@@ -342,6 +398,10 @@ public class MappedFileManager {
         mappedFiles.values().forEach((MappedFiledReferenceResource::close));
     }
 
+    public void sealAllBlocks() {
+        mappedFiles.values().forEach(DefaultMappedFile::sealAllBlocks);
+    }
+
     public void stopUpdateAllFilePosition() {
         mappedFiles.values().forEach((defaultMappedFile -> {
             defaultMappedFile.posActive = false;
@@ -369,14 +429,15 @@ public class MappedFileManager {
     public void close() {
         log.info("Closing MappedFileManager resources for instance: {}, bucket: {}", instanceName, bucketName);
 
+        stopAllThread();
+        // 先确保预创建任务退出，避免清理完成后又向 mappedFiles 添加映射。
+        closeThreadPool();
+
         // 2. 释放跳表及 activeMappedFile 中的 DefaultMappedFile 内存引用与句柄
         closeMappedFiles();
 
         // 3. 卸载 Bucket 级 FFM (Foreign Function & Memory) 堆外内存区域
         closeBucketMetaArena();
-
-        // 4. 关闭线程池
-        closeThreadPool();
 
         log.info("MappedFileManager resources closed successfully for bucket: {}", bucketName);
     }
@@ -418,16 +479,18 @@ public class MappedFileManager {
      * 第四步：关闭文件创建线程池
      */
     private void closeThreadPool() {
-        if (!createNewFileExecutor.isShutdown()) {
-            createNewFileExecutor.shutdown();
-            try {
-                if (!createNewFileExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
-                    createNewFileExecutor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
+        createNewFileExecutor.shutdown();
+        try {
+            if (!createNewFileExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
                 createNewFileExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
+                if (!createNewFileExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    throw new WalException("WAL creation task did not stop for " + bucketName);
+                }
             }
+        } catch (InterruptedException e) {
+            createNewFileExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+            throw new WalException("Interrupted while stopping WAL creation for " + bucketName, e);
         }
     }
 
@@ -448,9 +511,22 @@ public class MappedFileManager {
     }
 
     public void stopAllThread() {
+        chackMappedFileThreadState = false;
+        fileMetaFlushThreadState = false;
+        flushFileReadPositionThreadState = false;
         chackMappedFileThread.interrupt();
         fileMetaFlushThread.interrupt();
         flushFileReadPositionThread.interrupt();
+        try {
+            for (Thread thread : new Thread[]{chackMappedFileThread, fileMetaFlushThread, flushFileReadPositionThread}) {
+                if (thread == Thread.currentThread()) continue;
+                thread.join(10000);
+                if (thread.isAlive()) throw new WalException("WAL background task did not stop: " + thread.getName());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new WalException("Interrupted while stopping WAL tasks for " + bucketName, e);
+        }
     }
 
     public boolean mappedFileIsEmpty() {

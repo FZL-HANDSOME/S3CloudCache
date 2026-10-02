@@ -3,6 +3,17 @@ package org.foreverfzl.cloudcache.storage.instance;
 import org.foreverfzl.cloudcache.storage.factory.S3ClientFactory;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
 import org.foreverfzl.cloudcache.storage.instance.cloudcache.S3CloudCacheInstance;
+import org.foreverfzl.cloudcache.core.cache.CloudCacheBlock;
+import org.foreverfzl.cloudcache.core.datastruct.HeapBlockDataStruct;
+import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
+import org.foreverfzl.cloudcache.metadata.manager.DeadDataQueue;
+import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
+import org.foreverfzl.cloudcache.wal.storefile.AppendMessageResult;
+import org.foreverfzl.cloudcache.wal.datastruct.WalDataStruct;
+import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
+import org.foreverfzl.cloudchache.common.FutureContext;
+import org.foreverfzl.cloudchache.common.exception.CloudCacheException;
 import org.foreverfzl.cloudchache.common.WriteResult;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockSizeLevel;
 import org.foreverfzl.cloudchache.common.cloudcahceEnum.BlockUploadConcurrencyLevel;
@@ -11,17 +22,33 @@ import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.lang.reflect.Proxy;
+import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Scanner;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
@@ -51,11 +78,11 @@ public class S3CloudCacheInstanceText {
 //        //高并发测试
 //        highConcurrencyTest();
 //        //串行数据校验测试
-//        dataIntegrityTest();
+        dataIntegrityTest();
 //        //堆外内存测试
 //        offHeapDataIntegrityTest();
 //        中等并发大数据量测试
-        Medium_concurrency_large_data_volume_test();
+//        Medium_concurrency_large_data_volume_test();
     }
 
 
@@ -922,6 +949,621 @@ public class S3CloudCacheInstanceText {
             log.info("[堆外数据测试] ALL PASSED：堆外写入数据与S3数据完全一致");
         } finally {
             verifyClient.close();
+        }
+    }
+
+    // 以下回归只使用临时 WAL 和内存 S3Client，不修改上面真实 MinIO 测试的 main 入口。
+    private static final int REGRESSION_BLOCK_SIZE = 2 * 1024 * 1024;
+    private static final String REGRESSION_BUCKET = "offline-regression";
+
+    public static void offlineFutureConfirmationTest() throws Exception {
+        MemoryS3 remote = new MemoryS3();
+        remote.blockUploads.set(true);
+        try (RegressionFixture fixture = new RegressionFixture("confirmation", remote)) {
+            byte[] value = regressionRecord(1, 16385);
+            CompletableFuture<WriteResult> future = fixture.writer.writeHeapData(value);
+            sealRegressionTail(fixture.writer);
+            checkRegression(remote.uploadEntered.await(10, TimeUnit.SECONDS), "upload did not start");
+            checkRegression(!future.isDone(), "Future completed before S3 returned a successful response");
+            remote.allowUpload.countDown();
+            verifyRegressionResult(remote, value, future.get(15, TimeUnit.SECONDS));
+        } finally {
+            remote.allowUpload.countDown();
+        }
+    }
+
+    public static void offlineFailedUploadRecoveryTest() throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-failure-");
+        MemoryS3 failedRemote = new MemoryS3();
+        failedRemote.failUploads.set(true);
+        Map<Integer, byte[]> expected = new HashMap<>();
+        List<CompletableFuture<WriteResult>> futures = new ArrayList<>();
+        try (RegressionFixture fixture = new RegressionFixture(directory, "failed-restart", failedRemote)) {
+            for (int id = 0; id < 24; id++) {
+                byte[] record = regressionRecord(id, 32768 + id % 4);
+                expected.put(id, record);
+                futures.add(fixture.writer.writeHeapData(record));
+            }
+            // A partial tail must remain recoverable even when shutdown itself starts the failing upload.
+            fixture.close();
+            for (CompletableFuture<WriteResult> future : futures) {
+                try {
+                    WriteResult result = future.get(20, TimeUnit.SECONDS);
+                    checkRegression(!result.isSuccess(), "failed S3 upload returned a successful Future");
+                } catch (ExecutionException expectedFailure) {
+                    // Exceptional completion is also an explicit failure, never a false success.
+                }
+            }
+            checkRegression(failedRemote.attempts.get() >= 3, "transient upload exception was not retried");
+        }
+        checkRegression(failedRemote.objects.isEmpty(), "failure stub unexpectedly accepted an object");
+        try (var paths = Files.walk(directory)) {
+            checkRegression(paths.anyMatch(path -> Files.isRegularFile(path)
+                            && path.getFileName().toString().matches("\\d+")),
+                    "failed upload deleted its recovery WAL: " + directory);
+        }
+        MemoryS3 recoveredRemote = new MemoryS3();
+        try (RegressionFixture fixture = new RegressionFixture(directory, "failed-restart", recoveredRemote)) {
+            awaitRegressionBytes(recoveredRemote, totalRegressionBytes(expected), 20000);
+            verifyRegressionRecords(recoveredRemote, expected);
+        }
+    }
+
+    public static void offlineConcurrentIntegrityTest() throws Exception {
+        MemoryS3 remote = new MemoryS3();
+        try (RegressionFixture fixture = new RegressionFixture("concurrent", remote)) {
+            ExecutorService executor = Executors.newFixedThreadPool(8);
+            ConcurrentLinkedQueue<PendingRegressionRecord> pending = new ConcurrentLinkedQueue<>();
+            List<Future<?>> producers = new ArrayList<>();
+            CountDownLatch start = new CountDownLatch(1);
+            try {
+                for (int thread = 0; thread < 8; thread++) {
+                    int threadId = thread;
+                    producers.add(executor.submit(() -> {
+                        start.await();
+                        for (int sequence = 0; sequence < 96; sequence++) {
+                            int id = threadId * 96 + sequence;
+                            byte[] record = regressionRecord(id, 16384 + id % 97);
+                            CompletableFuture<WriteResult> future;
+                            switch (id % 4) {
+                                case 0 -> future = fixture.writer.writeHeapData(record);
+                                case 1 -> {
+                                    byte[] container = new byte[record.length + 11];
+                                    System.arraycopy(record, 0, container, 7, record.length);
+                                    future = fixture.writer.writeHeapData(container, 7, record.length);
+                                }
+                                case 2 -> {
+                                    ByteBuffer buffer = ByteBuffer.allocateDirect(record.length + 5);
+                                    buffer.position(5);
+                                    buffer.put(record).flip().position(5);
+                                    future = fixture.writer.writeOffHeapData(buffer);
+                                    checkRegression(buffer.position() == 5, "direct buffer position changed");
+                                }
+                                default -> {
+                                    ByteBuffer buffer = ByteBuffer.allocateDirect(record.length + 13);
+                                    buffer.position(9);
+                                    buffer.put(record).flip().position(4);
+                                    future = fixture.writer.writeOffHeapData(buffer, 5, record.length);
+                                    checkRegression(buffer.position() == 4, "direct slice position changed");
+                                }
+                            }
+                            pending.add(new PendingRegressionRecord(record, future));
+                        }
+                        return null;
+                    }));
+                }
+                start.countDown();
+                for (Future<?> producer : producers) producer.get(40, TimeUnit.SECONDS);
+                sealRegressionTail(fixture.writer);
+                Map<Integer, byte[]> expected = new HashMap<>();
+                for (PendingRegressionRecord entry : pending) {
+                    verifyRegressionResult(remote, entry.payload, entry.future.get(20, TimeUnit.SECONDS));
+                    expected.put(ByteBuffer.wrap(entry.payload).getInt(), entry.payload);
+                }
+                checkRegression(expected.size() == 768, "producer lost records");
+                checkRegression(remote.objects.size() >= 6, "test did not cross enough blocks");
+                checkRegression(fixture.writer.getMappedManager().getActiveMappedFile().get().fileFromOffset
+                        >= 2L * REGRESSION_BLOCK_SIZE, "test did not rotate WAL files");
+                verifyRegressionRecords(remote, expected);
+            } finally {
+                executor.shutdownNow();
+                executor.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    public static void offlineWriterSingletonTest() throws Exception {
+        try (RegressionFixture fixture = new RegressionFixture("writers", new MemoryS3())) {
+            ExecutorService executor = Executors.newFixedThreadPool(16);
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<BucketWriterWriter>> results = new ArrayList<>();
+            ConcurrentLinkedQueue<BucketWriterWriter> observed = new ConcurrentLinkedQueue<>();
+            try {
+                for (int index = 0; index < 16; index++) {
+                    results.add(executor.submit(() -> {
+                        start.await();
+                        BucketWriterWriter writer = fixture.instance.getBucketWriterInstance("concurrently-created-bucket");
+                        observed.add(writer);
+                        return writer;
+                    }));
+                }
+                start.countDown();
+                BucketWriterWriter first = results.getFirst().get(10, TimeUnit.SECONDS);
+                for (Future<BucketWriterWriter> result : results) {
+                    checkRegression(result.get(10, TimeUnit.SECONDS) == first, "same Bucket has multiple Writers");
+                }
+            } finally {
+                executor.shutdownNow();
+                executor.awaitTermination(5, TimeUnit.SECONDS);
+                // Also stop orphan recovery threads if the singleton assertion exposes a regression.
+                observed.forEach(BucketWriterWriter::close);
+            }
+        }
+    }
+
+    public static void offlineInstanceIsolationTest() throws Exception {
+        MemoryS3 secondRemote = new MemoryS3();
+        try (RegressionFixture first = new RegressionFixture("first-instance", new MemoryS3());
+             RegressionFixture second = new RegressionFixture("second-instance", secondRemote)) {
+            first.close();
+            byte[] record = regressionRecord(42, 255);
+            CompletableFuture<WriteResult> future = second.writer.writeHeapData(record);
+            sealRegressionTail(second.writer);
+            verifyRegressionResult(secondRemote, record, future.get(15, TimeUnit.SECONDS));
+            // Construction after another instance closes must also work in the same JVM.
+            try (RegressionFixture third = new RegressionFixture("third-instance", new MemoryS3())) {
+                checkRegression(third.writer != null, "new instance failed after another instance closed");
+            }
+        }
+    }
+
+    public static void offlineRestartKeyUniquenessTest() throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-restart-");
+        MemoryS3 remote = new MemoryS3();
+        WriteResult oldResult;
+        byte[] oldRecord = regressionRecord(100, 1111);
+        try (RegressionFixture first = new RegressionFixture(directory, "same-instance", remote)) {
+            CompletableFuture<WriteResult> oldFuture = first.writer.writeHeapData(oldRecord);
+            sealRegressionTail(first.writer);
+            oldResult = oldFuture.get(15, TimeUnit.SECONDS);
+            verifyRegressionResult(remote, oldRecord, oldResult);
+        }
+        try (RegressionFixture second = new RegressionFixture(directory, "same-instance", remote)) {
+            byte[] newRecord = regressionRecord(101, 2222);
+            CompletableFuture<WriteResult> newFuture = second.writer.writeHeapData(newRecord);
+            sealRegressionTail(second.writer);
+            WriteResult newResult = newFuture.get(15, TimeUnit.SECONDS);
+            checkRegression(!oldResult.getS3Key().equals(newResult.getS3Key()), "restart reused an acknowledged S3 key");
+            verifyRegressionResult(remote, oldRecord, oldResult);
+            verifyRegressionResult(remote, newRecord, newResult);
+            verifyRegressionRecords(remote, Map.of(100, oldRecord, 101, newRecord));
+        }
+    }
+
+    public static void offlineNonContiguousConfirmationTest() throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-upload-gap-");
+        MemoryS3 remote = new MemoryS3();
+        byte[] failedRecord = regressionRecord(200, REGRESSION_BLOCK_SIZE * 3 / 4);
+        byte[] confirmedRecord = regressionRecord(201, REGRESSION_BLOCK_SIZE * 3 / 4 + 1);
+        remote.failedRecordIds.add(200);
+        WriteResult confirmed;
+        try (RegressionFixture fixture = new RegressionFixture(directory, "upload-gap", remote)) {
+            CompletableFuture<WriteResult> failed = fixture.writer.writeHeapData(failedRecord);
+            CompletableFuture<WriteResult> successful = fixture.writer.writeHeapData(confirmedRecord);
+            sealRegressionTail(fixture.writer);
+            confirmed = successful.get(20, TimeUnit.SECONDS);
+            verifyRegressionResult(remote, confirmedRecord, confirmed);
+            try {
+                checkRegression(!failed.get(20, TimeUnit.SECONDS).isSuccess(), "gap block reported false success");
+            } catch (ExecutionException expectedFailure) {
+                // The first block failed, but the following block is already acknowledged to its caller.
+            }
+        }
+        String confirmedObject = REGRESSION_BUCKET + "/" + confirmed.getS3Key();
+        int previousUploads = remote.acceptedUploads.get(confirmedObject).get();
+        remote.failedRecordIds.clear();
+        try (RegressionFixture fixture = new RegressionFixture(directory, "upload-gap", remote)) {
+            awaitRegressionBytes(remote, (long) failedRecord.length + confirmedRecord.length, 20000);
+            // Wait for recovery/upload termination before asserting absence of a late duplicate upload.
+            fixture.close();
+            checkRegression(remote.acceptedUploads.get(confirmedObject).get() == previousUploads,
+                    "restart reuploaded an acknowledged block beyond a failed upload gap");
+            verifyRegressionResult(remote, confirmedRecord, confirmed);
+            verifyRegressionRecords(remote, Map.of(200, failedRecord, 201, confirmedRecord));
+        }
+    }
+
+    public static void offlineRuntimeBrokenBlockRecoveryTest() throws Exception {
+        MemoryS3 remote = new MemoryS3();
+        try (RegressionFixture fixture = new RegressionFixture("broken-block", remote)) {
+            // Fault injection stays in the test: WAL receives real data, only the second core copy fails.
+            var coreField = BucketWriterWriter.class.getDeclaredField("cacheBlockManager");
+            coreField.setAccessible(true);
+            CacheBlockManager core = (CacheBlockManager) coreField.get(fixture.writer);
+            byte[] first = regressionRecord(300, 65537);
+            byte[] second = regressionRecord(301, 65538);
+            byte[] late = regressionRecord(302, 65539);
+            CompletableFuture<WriteResult> firstFuture = fixture.writer.writeHeapData(first);
+            MappedFileManager wal = fixture.writer.getMappedManager();
+            AppendMessageResult secondWal = wal.appendData(new WalDataStruct(second));
+            AppendMessageResult lateWal = wal.appendData(new WalDataStruct(late));
+            checkRegression(secondWal.isOk() && lateWal.isOk(), "fault injection WAL append failed");
+            checkRegression(secondWal.getLogicalIndex() == lateWal.getLogicalIndex(), "test records must share one block");
+            CompletableFuture<WriteResult> secondFuture = new CompletableFuture<>();
+            FutureContext secondContext = new FutureContext(secondFuture);
+            secondContext.setWalRecordId(secondWal.getBlockOffset());
+            CompletableFuture<WriteResult> lateFuture = new CompletableFuture<>();
+            FutureContext lateContext = new FutureContext(lateFuture);
+            lateContext.setWalRecordId(lateWal.getBlockOffset());
+            AtomicInteger failedCopies = new AtomicInteger();
+            CloudCacheBlock originalBlock = core.getExistingBlock(secondWal.getFileFromOffset(), secondWal.getLogicalIndex());
+            var failedAppend = core.appendData(new HeapBlockDataStruct(secondWal.getDefaultMappedFile(),
+                    secondWal.getLogicalIndex(), second, 0, second.length) {
+                @Override
+                public boolean writeTo(MemorySegment target) {
+                    failedCopies.incrementAndGet();
+                    return false;
+                }
+            }, secondContext, true);
+            checkRegression(!failedAppend.result() && failedCopies.get() == 2, "physical append failure was not injected");
+            sealRegressionTail(fixture.writer);
+            CloudCacheBlock prematureLease = core.beginRecovery(secondWal.getFileFromOffset(), secondWal.getLogicalIndex());
+            if (prematureLease != null) core.finishRecovery(prematureLease, false);
+            checkRegression(prematureLease == null, "recovery started before the late original append settled");
+            checkRegression(core.getExistingBlock(secondWal.getFileFromOffset(), secondWal.getLogicalIndex()) == originalBlock,
+                    "broken logical block was recycled before recovery");
+            // This original append must register its Future and settle, but must not add a duplicate core copy.
+            core.appendData(new HeapBlockDataStruct(lateWal.getDefaultMappedFile(), lateWal.getLogicalIndex(),
+                    late, 0, late.length), lateContext, true);
+            verifyRegressionResult(remote, first, firstFuture.get(20, TimeUnit.SECONDS));
+            verifyRegressionResult(remote, second, secondFuture.get(20, TimeUnit.SECONDS));
+            verifyRegressionResult(remote, late, lateFuture.get(20, TimeUnit.SECONDS));
+            verifyRegressionRecords(remote, Map.of(300, first, 301, second, 302, late));
+        }
+    }
+
+    public static void offlineInterruptedPoolWaitTest() throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-interrupted-pool-");
+        MemoryS3 remote = new MemoryS3();
+        remote.blockUploads.set(true);
+        byte[] first = regressionRecord(400, REGRESSION_BLOCK_SIZE * 3 / 4);
+        byte[] second = regressionRecord(401, REGRESSION_BLOCK_SIZE * 3 / 4 + 1);
+        byte[] waiting = regressionRecord(402, REGRESSION_BLOCK_SIZE * 3 / 4 + 2);
+        long interruptedFileOffset;
+        try (RegressionFixture fixture = new RegressionFixture(directory, "interrupted-pool", remote)) {
+            CompletableFuture<WriteResult> firstFuture = fixture.writer.writeHeapData(first);
+            CompletableFuture<WriteResult> secondFuture = fixture.writer.writeHeapData(second);
+            checkRegression(remote.uploadEntered.await(10, TimeUnit.SECONDS), "pool owners did not start uploading");
+            // Both physical blocks remain owned by gated uploads; the next logical block has only WAL data.
+            MappedFileManager wal = fixture.writer.getMappedManager();
+            AppendMessageResult record = wal.appendData(new WalDataStruct(waiting));
+            checkRegression(record.isOk(), "waiting record was not accepted into WAL");
+            interruptedFileOffset = record.getFileFromOffset();
+            var coreField = BucketWriterWriter.class.getDeclaredField("cacheBlockManager");
+            coreField.setAccessible(true);
+            CacheBlockManager core = (CacheBlockManager) coreField.get(fixture.writer);
+            checkRegression(core.getExistingBlock(record.getFileFromOffset(), record.getLogicalIndex()) == null,
+                    "interrupted test unexpectedly has a physical block binding");
+            CompletableFuture<WriteResult> future = new CompletableFuture<>();
+            FutureContext context = new FutureContext(future);
+            context.setWalRecordId(record.getBlockOffset());
+            try {
+                Thread.currentThread().interrupt();
+                var result = core.appendData(new HeapBlockDataStruct(record.getDefaultMappedFile(),
+                        record.getLogicalIndex(), waiting, 0, waiting.length), context, true);
+                checkRegression(!result.result(), "interrupted resource wait returned success");
+                checkRegression(Thread.currentThread().isInterrupted(), "append discarded interrupt status");
+            } finally {
+                Thread.interrupted(); // Clear only the interruption deliberately injected by this test.
+            }
+            checkRegression(!future.get(5, TimeUnit.SECONDS).isSuccess(), "interrupted request did not fail promptly");
+            checkRegression(wal.blockMetaDataManager.getBlockMetaData(record.getFileFromOffset(),
+                    record.getLogicalIndex()).getState() == BlockMetaData.FAILED, "unbound interrupted block is not FAILED");
+            checkRegression(core.beginRecovery(record.getFileFromOffset(), record.getLogicalIndex()) == null,
+                    "unbound terminal task unexpectedly obtained a runtime recovery lease");
+            var deadQueueField = wal.blockMetaDataManager.getClass().getDeclaredField("deadDataQueue");
+            deadQueueField.setAccessible(true);
+            DeadDataQueue deadQueue = (DeadDataQueue) deadQueueField.get(wal.blockMetaDataManager);
+            var dead = deadQueue.poll();
+            checkRegression(dead != null && dead.getFileFromOffset() == record.getFileFromOffset()
+                    && dead.getLogicalIndex() == record.getLogicalIndex(), "interrupted task did not reach the dead-letter queue");
+            remote.allowUpload.countDown();
+            verifyRegressionResult(remote, first, firstFuture.get(15, TimeUnit.SECONDS));
+            verifyRegressionResult(remote, second, secondFuture.get(15, TimeUnit.SECONDS));
+        } finally {
+            remote.allowUpload.countDown();
+        }
+        try (var files = Files.walk(directory)) {
+            checkRegression(files.anyMatch(path -> Files.isRegularFile(path)
+                    && path.getFileName().toString().equals(Long.toString(interruptedFileOffset))),
+                    "interrupted request's WAL was deleted");
+        }
+        try (RegressionFixture fixture = new RegressionFixture(directory, "interrupted-pool", remote)) {
+            awaitRegressionBytes(remote, (long) first.length + second.length + waiting.length, 20000);
+            fixture.close();
+            verifyRegressionRecords(remote, Map.of(400, first, 401, second, 402, waiting));
+        }
+    }
+
+    public static void offlineCorruptWalRecoveryTest() throws Exception {
+        offlineCorruptWalRecovery(false);
+    }
+
+    public static void offlineZeroHoleWalRecoveryTest() throws Exception {
+        offlineCorruptWalRecovery(true);
+    }
+
+    private static void offlineCorruptWalRecovery(boolean zeroHole) throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-corrupt-wal-");
+        MemoryS3 failedRemote = new MemoryS3();
+        failedRemote.failUploads.set(true);
+        byte[] first = regressionRecord(500, 4097);
+        byte[] second = regressionRecord(501, 4099);
+        try (RegressionFixture fixture = new RegressionFixture(directory, "corrupt-wal", failedRemote)) {
+            CompletableFuture<WriteResult> firstFuture = fixture.writer.writeHeapData(first);
+            CompletableFuture<WriteResult> secondFuture = fixture.writer.writeHeapData(second);
+            CompletableFuture<WriteResult> thirdFuture = zeroHole
+                    ? fixture.writer.writeHeapData(regressionRecord(502, 4101)) : null;
+            fixture.close();
+            checkRegression(!firstFuture.get(5, TimeUnit.SECONDS).isSuccess(), "failed setup upload was acknowledged");
+            checkRegression(!secondFuture.get(5, TimeUnit.SECONDS).isSuccess(), "failed setup upload was acknowledged");
+            if (thirdFuture != null) {
+                checkRegression(!thirdFuture.get(5, TimeUnit.SECONDS).isSuccess(), "failed setup upload was acknowledged");
+            }
+        }
+        Path walFile;
+        try (var files = Files.walk(directory)) {
+            walFile = files.filter(path -> Files.isRegularFile(path) && path.getFileName().toString().equals("0"))
+                    .findFirst().orElseThrow(() -> new AssertionError("setup WAL disappeared"));
+        }
+        // Keep the first record valid; simulate either CRC damage or an unfilled reservation before a valid third record.
+        long secondHeaderOffset = 4096L + 12 + ((first.length + 3) & ~3);
+        try (var channel = Files.newByteChannel(walFile, StandardOpenOption.WRITE)) {
+            channel.position(zeroHole ? secondHeaderOffset : secondHeaderOffset + 12);
+            ByteBuffer damage = zeroHole ? ByteBuffer.allocate(12 + ((second.length + 3) & ~3))
+                    : ByteBuffer.wrap(new byte[]{(byte) (second[0] ^ 0x7f)});
+            while (damage.hasRemaining()) channel.write(damage);
+        }
+        MemoryS3 remote = new MemoryS3();
+        S3CloudCacheInstance instance = new S3CloudCacheInstance(remote.client(),
+                regressionConfig(directory, "corrupt-wal"));
+        try {
+            instance.start();
+            var recoveryField = S3CloudCacheInstance.class.getDeclaredField("recoveryFuture");
+            recoveryField.setAccessible(true);
+            CompletableFuture<?> recovery = (CompletableFuture<?>) recoveryField.get(instance);
+            boolean rejected = false;
+            try {
+                recovery.get(15, TimeUnit.SECONDS);
+            } catch (ExecutionException expectedFailure) {
+                rejected = true;
+            }
+            checkRegression(rejected, "corrupt WAL recovery incorrectly reported success");
+            checkRegression(remote.attempts.get() == 0 && remote.objects.isEmpty(),
+                    "corrupt WAL uploaded a valid prefix as though the block were complete");
+        } finally {
+            instance.close(3000, 3000, 5000);
+        }
+        checkRegression(Files.exists(walFile), "corrupt original WAL was removed instead of retained for repair");
+        checkRegression(remote.objects.isEmpty(), "close uploaded the prefix of a corrupt block");
+        checkRegression(BucketMetaInfoUtil.readBucketMetaFile(walFile.getParent().getParent()).getIsDirty() != 0,
+                "failed WAL recovery incorrectly marked its bucket clean");
+    }
+
+    public static void offlineCorruptBucketMetadataTest() throws Exception {
+        Path directory = Files.createTempDirectory("cloudcache-regression-corrupt-bucket-meta-");
+        MemoryS3 failedRemote = new MemoryS3();
+        failedRemote.failUploads.set(true);
+        try (RegressionFixture fixture = new RegressionFixture(directory, "corrupt-bucket-meta", failedRemote)) {
+            CompletableFuture<WriteResult> future = fixture.writer.writeHeapData(regressionRecord(600, 8193));
+            fixture.close();
+            checkRegression(!future.get(5, TimeUnit.SECONDS).isSuccess(), "failed setup upload was acknowledged");
+        }
+        Path walFile;
+        try (var files = Files.walk(directory)) {
+            walFile = files.filter(path -> Files.isRegularFile(path) && path.getFileName().toString().equals("0"))
+                    .findFirst().orElseThrow(() -> new AssertionError("setup WAL disappeared"));
+        }
+        Path bucketDirectory = walFile.getParent().getParent();
+        Path metadataFile = bucketDirectory.resolve("bucketMeta");
+        byte[] metadataBytes = Files.readAllBytes(metadataFile);
+        try (var channel = Files.newByteChannel(metadataFile, StandardOpenOption.WRITE)) {
+            channel.position(16); // Stored CRC, after dirty(4), block size(4), and WAL size(8).
+            channel.write(ByteBuffer.wrap(new byte[]{(byte) (metadataBytes[16] ^ 0x40)}));
+        }
+        org.junit.Assert.assertThrows(org.foreverfzl.cloudchache.common.exception.WalException.class,
+                () -> BucketMetaInfoUtil.readBucketMetaFile(bucketDirectory));
+        byte[] originalWal = Files.readAllBytes(walFile);
+        byte[] corruptedMetadata = Files.readAllBytes(metadataFile);
+        MemoryS3 remote = new MemoryS3();
+        S3CloudCacheInstance instance = new S3CloudCacheInstance(remote.client(),
+                regressionConfig(directory, "corrupt-bucket-meta"));
+        try {
+            instance.start();
+            var recoveryField = S3CloudCacheInstance.class.getDeclaredField("recoveryFuture");
+            recoveryField.setAccessible(true);
+            CompletableFuture<?> recovery = (CompletableFuture<?>) recoveryField.get(instance);
+            boolean recoveryRejected = false;
+            try {
+                recovery.get(15, TimeUnit.SECONDS);
+            } catch (ExecutionException expectedFailure) {
+                recoveryRejected = true;
+            }
+            checkRegression(recoveryRejected, "invalid bucket metadata was treated as an empty recovery");
+            boolean writerRejected = false;
+            try {
+                instance.getBucketWriterInstance(REGRESSION_BUCKET);
+            } catch (CloudCacheException expectedFailure) {
+                writerRejected = true;
+            }
+            checkRegression(writerRejected, "new Writer overwrote metadata after failed recovery preparation");
+            checkRegression(remote.attempts.get() == 0, "uninterpretable WAL was uploaded");
+        } finally {
+            instance.close(3000, 3000, 5000);
+        }
+        checkRegression(Arrays.equals(originalWal, Files.readAllBytes(walFile)),
+                "failed metadata recovery altered or truncated the original WAL");
+        checkRegression(Arrays.equals(corruptedMetadata, Files.readAllBytes(metadataFile)),
+                "failed metadata recovery overwrote the original bucket metadata");
+    }
+
+    private static void sealRegressionTail(BucketWriterWriter writer) {
+        MappedFileManager manager = writer.getMappedManager();
+        manager.sealAllBlocks();
+        manager.endFlushFileReadPosition();
+        manager.endMetaFlush();
+    }
+
+    private static byte[] regressionRecord(int id, int length) {
+        byte[] bytes = new byte[length];
+        ByteBuffer.wrap(bytes).putInt(id).putInt(length);
+        for (int index = 8; index < length; index++) bytes[index] = (byte) (id * 31 + index * 17);
+        return bytes;
+    }
+
+    private static void verifyRegressionResult(MemoryS3 remote, byte[] expected, WriteResult result) {
+        checkRegression(result != null && result.isSuccess(), "write did not finish successfully");
+        byte[] object = remote.objects.get(REGRESSION_BUCKET + "/" + result.getS3Key());
+        checkRegression(object != null, "successful Future refers to an object not accepted by S3");
+        int offset = Math.toIntExact(result.getOffset());
+        checkRegression(result.getSize() == expected.length && offset >= 0
+                && offset + expected.length <= object.length, "returned range is invalid");
+        checkRegression(Arrays.equals(expected, Arrays.copyOfRange(object, offset, offset + expected.length)),
+                "returned range differs from original record id=" + ByteBuffer.wrap(expected).getInt());
+    }
+
+    private static long totalRegressionBytes(Map<Integer, byte[]> records) {
+        return records.values().stream().mapToLong(bytes -> bytes.length).sum();
+    }
+
+    private static void awaitRegressionBytes(MemoryS3 remote, long expectedBytes, long timeoutMillis) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (remote.objects.values().stream().mapToLong(bytes -> bytes.length).sum() < expectedBytes) {
+            checkRegression(System.nanoTime() < deadline, "recovery did not upload all expected bytes");
+            Thread.sleep(10);
+        }
+    }
+
+    private static void verifyRegressionRecords(MemoryS3 remote, Map<Integer, byte[]> expected) {
+        Set<Integer> found = new HashSet<>();
+        long total = 0;
+        for (byte[] object : remote.objects.values()) {
+            int offset = 0;
+            while (offset < object.length) {
+                checkRegression(object.length - offset >= 8, "truncated record header in S3 object");
+                ByteBuffer header = ByteBuffer.wrap(object, offset, 8);
+                int id = header.getInt();
+                int length = header.getInt();
+                checkRegression(length >= 8 && length <= object.length - offset, "corrupt record length in S3");
+                checkRegression(found.add(id), "duplicate record in S3: " + id);
+                checkRegression(expected.containsKey(id), "unexpected record in S3: " + id);
+                checkRegression(Arrays.equals(expected.get(id), Arrays.copyOfRange(object, offset, offset + length)),
+                        "S3 payload differs for record " + id);
+                offset += length;
+                total += length;
+            }
+        }
+        checkRegression(found.equals(expected.keySet()), "S3 record set has missing records");
+        checkRegression(total == totalRegressionBytes(expected), "S3 payload byte count mismatch");
+    }
+
+    private static void checkRegression(boolean condition, String message) {
+        if (!condition) throw new AssertionError(message);
+    }
+
+    private record PendingRegressionRecord(byte[] payload, CompletableFuture<WriteResult> future) { }
+
+    private static S3CloudCacheConfig regressionConfig(Path directory, String name) {
+        BucketConfig bucket = new BucketConfig()
+                .setBlockSize(REGRESSION_BLOCK_SIZE)
+                .setCacheSize(2L * REGRESSION_BLOCK_SIZE)
+                .setWalFileSize(2L * REGRESSION_BLOCK_SIZE)
+                .setBlockUpLoadCount(2)
+                .setS3KeyPrefix("offline-regression")
+                .setWarmWalFile(false)
+                .setLockMappedFilePageCache(false)
+                .setEnableHeadCheck(true);
+        S3CloudCacheConfig config = new S3CloudCacheConfig(name, directory.toString(), bucket);
+        config.blockMaxIdleTime = 600000;
+        return config;
+    }
+
+    private static final class RegressionFixture implements AutoCloseable {
+        private final S3CloudCacheInstance instance;
+        private final BucketWriterWriter writer;
+        private final MemoryS3 remote;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private RegressionFixture(String name, MemoryS3 remote) throws Exception {
+            this(Files.createTempDirectory("cloudcache-regression-" + name + "-"), name, remote);
+        }
+
+        private RegressionFixture(Path directory, String name, MemoryS3 remote) throws Exception {
+            this.remote = remote;
+            log.info("Offline regression WAL directory: {}", directory);
+            instance = new S3CloudCacheInstance(remote.client(), regressionConfig(directory, name));
+            instance.start();
+            writer = instance.getBucketWriterInstance(REGRESSION_BUCKET);
+        }
+
+        @Override
+        public void close() {
+            remote.allowUpload.countDown();
+            if (closed.compareAndSet(false, true)) instance.close(3000, 3000, 5000);
+        }
+    }
+
+    /** Synchronous in-memory S3 boundary: bytes are accepted before a successful response. */
+    private static final class MemoryS3 {
+        private final ConcurrentHashMap<String, byte[]> objects = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<String, AtomicInteger> acceptedUploads = new ConcurrentHashMap<>();
+        private final Set<Integer> failedRecordIds = ConcurrentHashMap.newKeySet();
+        private final AtomicBoolean blockUploads = new AtomicBoolean();
+        private final AtomicBoolean failUploads = new AtomicBoolean();
+        private final AtomicInteger attempts = new AtomicInteger();
+        private final CountDownLatch uploadEntered = new CountDownLatch(1);
+        private final CountDownLatch allowUpload = new CountDownLatch(1);
+
+        private S3Client client() {
+            return (S3Client) Proxy.newProxyInstance(S3Client.class.getClassLoader(), new Class<?>[]{S3Client.class},
+                    (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "putObject": {
+                                attempts.incrementAndGet();
+                                uploadEntered.countDown();
+                                if (blockUploads.get() && !allowUpload.await(20, TimeUnit.SECONDS)) {
+                                    throw new AssertionError("test upload gate timed out");
+                                }
+                                if (failUploads.get()) throw S3Exception.builder().statusCode(503).message("injected offline failure").build();
+                                PutObjectRequest request = (PutObjectRequest) args[0];
+                                RequestBody body = (RequestBody) args[1];
+                                byte[] bytes;
+                                try (var input = body.contentStreamProvider().newStream()) {
+                                    bytes = input.readAllBytes();
+                                }
+                                checkRegression(bytes.length == body.contentLength(), "S3 request body length mismatch");
+                                if (bytes.length >= 8 && failedRecordIds.contains(ByteBuffer.wrap(bytes).getInt())) {
+                                    throw S3Exception.builder().statusCode(503).message("injected block-specific failure").build();
+                                }
+                                String objectKey = request.bucket() + "/" + request.key();
+                                objects.put(objectKey, bytes);
+                                acceptedUploads.computeIfAbsent(objectKey, key -> new AtomicInteger()).incrementAndGet();
+                                return PutObjectResponse.builder().eTag("offline-etag").build();
+                            }
+                            case "headObject": {
+                                HeadObjectRequest request = (HeadObjectRequest) args[0];
+                                byte[] bytes = objects.get(request.bucket() + "/" + request.key());
+                                if (bytes == null) throw S3Exception.builder().statusCode(404).message("missing offline object").build();
+                                return HeadObjectResponse.builder().contentLength((long) bytes.length).eTag("offline-etag").build();
+                            }
+                            case "close": return null;
+                            case "serviceName": return "s3";
+                            case "toString": return "OfflineMemoryS3";
+                            case "hashCode": return System.identityHashCode(proxy);
+                            case "equals": return proxy == args[0];
+                            default: throw new UnsupportedOperationException("Unexpected S3 operation: " + method);
+                        }
+                    });
         }
     }
 

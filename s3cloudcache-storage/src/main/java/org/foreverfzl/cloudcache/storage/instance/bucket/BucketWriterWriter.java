@@ -25,8 +25,6 @@ import org.slf4j.LoggerFactory;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.zip.CRC32;
 
 /**
  * 直接获取对应Bucket的操作句柄，适合高性能写数据
@@ -39,7 +37,9 @@ public class BucketWriterWriter extends AbstractBucketWriter {
 
     private final MappedFileManager mappedFileManager;
 
-    private WriterState state;
+    private volatile WriterState state;
+    private final Object admissionLock = new Object();
+    private int inFlightWrites;
 
     private final CacheBlockManager cacheBlockManager;
 
@@ -67,16 +67,15 @@ public class BucketWriterWriter extends AbstractBucketWriter {
     }
 
 
-    //咱们的项目修改为只要数据成功写入到wal文件中WriteResult就为true，
-    // 如果一个S3key的WriteResult有一个为false则代表与该S3key相关的数据全部上传失败(让用户自己操作)。
+    // Future 以 Block 为提交单位，仅在 S3 上传成功并记录确认后完成成功。
     //将data全部上传到S3
     @Override
     public CompletableFuture<WriteResult> writeHeapData(byte[] data) {
         CompletableFuture<WriteResult> future = new CompletableFuture<>();
         FutureContext futureContext = new FutureContext(future);
         try {
-            if (data == null) {
-                throw new IllegalArgumentException("data cannot be null");
+            if (data == null || data.length == 0) {
+                throw new IllegalArgumentException("data cannot be null or empty");
             }
             doWrite(new WalDataStruct(data), futureContext, future,
                     (mappedFile, logicalIndex) ->
@@ -175,7 +174,25 @@ public class BucketWriterWriter extends AbstractBucketWriter {
      * @param builder       根据 WAL 追加结果构建对应 BlockDataStruct（堆内/堆外）
      */
     private void doWrite(DataStruct walDataStruct, FutureContext futureContext, CompletableFuture<WriteResult> future,
-                         BlockDataStructBuilder builder) throws Exception {
+                          BlockDataStructBuilder builder) throws Exception {
+        synchronized (admissionLock) {
+            if (state != WriterState.RUNNING) {
+                throw new IllegalStateException("Bucket writer is closing: " + bucketName);
+            }
+            inFlightWrites++;
+        }
+        try {
+            doAcceptedWrite(walDataStruct, futureContext, future, builder);
+        } finally {
+            synchronized (admissionLock) {
+                inFlightWrites--;
+                admissionLock.notifyAll();
+            }
+        }
+    }
+
+    private void doAcceptedWrite(DataStruct walDataStruct, FutureContext futureContext,
+                                 CompletableFuture<WriteResult> future, BlockDataStructBuilder builder) throws Exception {
         AppendMessageResult result = mappedFileManager.appendData(walDataStruct);
         long fileFromOffset = result.getFileFromOffset();
         int logicalIndex = result.getLogicalIndex();
@@ -187,12 +204,22 @@ public class BucketWriterWriter extends AbstractBucketWriter {
             if (logicalIndex >= 0) {
                 //获取对应的cacheBlock，如果是第一次获取，那么该block中的DefaultMappedFile为null
                 //但是无伤大雅，因为既然出错了DefaultMappedFile也用不到
-                CloudCacheBlock cacheBlock = cacheBlockManager.getBlock(fileFromOffset, logicalIndex);
+                CloudCacheBlock cacheBlock = cacheBlockManager.getExistingBlock(fileFromOffset, logicalIndex);
                 //将CloudCacheBlock标记为unActive并且标记为延迟删除
-                cacheBlock.getReference();
-                cacheBlock.setUnActive();
-                cacheBlock.setDelayClean();
-                cacheBlock.releaseReference();
+                BlockMetaData meta = blockMetaDataManager.getBlockMetaData(fileFromOffset, logicalIndex);
+                if (meta != null) {
+                    synchronized (meta) {
+                        meta.markUploadFailed();
+                        if (cacheBlock != null && cacheBlock.getBlockMetaData() == meta
+                                && cacheBlockManager.getExistingBlock(fileFromOffset, logicalIndex) == cacheBlock) {
+                            cacheBlock.getReference();
+                            cacheBlock.setUnActive();
+                            cacheBlock.setDelayClean();
+                            cacheBlock.releaseReference();
+                        }
+                    }
+                    meta.failAllFuture();
+                }
             }
             future.complete(new WriteResult(null, -1, -1, false));
             //对应的元数据对象这里可以不及时删除，因为删除文件的时候会进行删除
@@ -244,125 +271,96 @@ public class BucketWriterWriter extends AbstractBucketWriter {
         if (mappedFile == null) {
             throw new NullPointerException("MappedFile is null");
         }
-        int blockSize = mappedFile.getBlockSize();
-        MemorySegment memorySegment = mappedFile.getBlockMappedMemorySegmentSlice(blockIndex);
-        MappedFileReader reader = new MappedFileReader(mappedFile, memorySegment, blockSize, deadDataInfo);
-        return reader;
+        // 获取映射视图和复制快照必须一起与 clean 互斥，不能先拿到失效的 MemorySegment。
+        synchronized (mappedFile) {
+            if (mappedFile.isCleanup()) throw new IllegalStateException("Recovery WAL is already closed");
+            return new MappedFileReader(mappedFile, mappedFile.getBlockMappedMemorySegmentSlice(blockIndex),
+                    mappedFile.getBlockSize(), deadDataInfo);
+        }
     }
 
 
     private void getBlockBroken() {
         while (active) {
-            long fileFromOffset = -1;
-            int blockIndex = -1;
-            BlockMetaData blockMetaData = null;
-            RecoverTask task = null;
-            CloudCacheBlock cacheBlock = null;
+            CloudCacheBlock block = null;
+            DefaultMappedFile file = null;
+            boolean recovered = false;
             try {
-                //获取任务
-                task = blockMetaDataManager.getTaskFromRecoverQueue();
-                if (task.getTimes() == 5) {
-                    //如果重新放回超过5次则不进行数据恢复
-                    log.warn("fileFromOffset= {} blockIndex= {} can not recover,because put back over 5 times", fileFromOffset, blockIndex);
-                    continue;
-                }
-                fileFromOffset = task.getFileFromOffset();
-                blockIndex = task.getBlockIndex();
-                //先看看对应的block是否真正全部写入到PageCache或者落盘
-                blockMetaData = blockMetaDataManager.getBlockMetaData(fileFromOffset, blockIndex);
-                if (blockMetaData == null) {
-                    log.warn("fileFromOffset= {} blockIndex= {} can not recover,because blockMetaData is null", fileFromOffset, blockIndex);
-                    continue;
-                }
-                //先检查所有数据是否全部写入到PageCache中
-                if (blockMetaData.getExpectedBytes() != blockMetaData.getPageCacheBytes()) {
-                    //由于对应的wal数据还没写完，该block不能进行数据恢复，重新放回
-                    task.incrementTimes();
+                RecoverTask task = blockMetaDataManager.getTaskFromRecoverQueue();
+                BlockMetaData meta = blockMetaDataManager.getBlockMetaData(task.getFileFromOffset(), task.getBlockIndex());
+                if (meta == null || meta.getState() != BlockMetaData.SEALED || !meta.isBroken()) continue;
+                block = cacheBlockManager.beginRecovery(task.getFileFromOffset(), task.getBlockIndex());
+                if (block == null) {
+                    // 原写入尚未走完，不是恢复失败；保留任务，不能按等待次数丢弃。
                     blockMetaDataManager.reSetTaskToRecoverQueue(task);
-                    Thread.sleep(1000);
+                    Thread.sleep(20);
                     continue;
                 }
-                //物理block写入失败后该CloudCacheBlock会存放在cacheBlockManager的keyBlockMap
-                //然后检查此时该CacheBlock是否有其它线程写入或者上传
-                cacheBlock = cacheBlockManager.getExistingBlock(fileFromOffset, blockIndex);
-                if(cacheBlock==null)continue;
-                int referenceCount = cacheBlock.getReferenceCount();
-                if (referenceCount != 0) {
-                    //说明有其它线程正在写入并且上传，将恢复任务重新放入到队列中
-                    task.incrementTimes();
-                    blockMetaDataManager.reSetTaskToRecoverQueue(task);
-                    Thread.sleep(1000);
-                    continue;
+                file = mappedFileManager.getMappedFile(task.getFileFromOffset());
+                if (file == null) throw new IllegalStateException("Recovery WAL is missing");
+                file.hold();
+                int recoveredBytes = 0;
+                for (WalBlockReader.Record record : WalBlockReader.readBlock(file, task.getBlockIndex())) {
+                    FutureContext context = meta.getFuture(record.walOffset());
+                    if (context == null) throw new IllegalStateException("Recovery record has no original request");
+                    var result = cacheBlockManager.appendData(new HeapBlockDataStruct(file, task.getBlockIndex(),
+                            record.value(), 0, record.value().length), context, false);
+                    if (!result.result()) throw new IllegalStateException("Physical Block replay failed");
+                    recoveredBytes += record.value().length;
                 }
-            } catch (InterruptedException interruptedException) {
-                active = false;
+                recovered = recoveredBytes == meta.getExpectedBytes();
+                if (!recovered) throw new IllegalStateException("Recovery byte count differs from accepted WAL bytes");
+            } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
-            }
-            DefaultMappedFile mappedFile = mappedFileManager.getMappedFile(fileFromOffset);
-            if (mappedFile == null) {
-                continue;
-            }
-            //到这里该block的状态为：broken为true并且封口，并且block数据全部写入到了PageCache，并且此时没有其它线程引用该block
-            //在此我们需要将isBroken设置为flase，active设置为true，并且将该CacheBlock的指针设置为0，并将元数据的Finish大小设置为0
-            cacheBlock.resetWritePosition();
-            cacheBlock.setActive();
-            blockMetaData.clearFinishedBytes();
-            mappedFile.hold();
-            try {
-                int blockSize = mappedFile.getBlockSize();
-                long blockOffset = 0;
-                // curPos/endPos 是“文件内相对偏移”：getIntFromDataArea/getOrgDataFromDataArea 内部会再加 FILE_META_SIZE，
-                // 因此这里不能加上全局 fileFromOffset，否则会越界访问 mappedMemorySegment
-                long endPos = ((long) (blockIndex + 1) * blockSize);
-                long curPos = ((long) blockIndex * blockSize);
-                CRC32 crc = new CRC32();
-                //获取该block对应所有的future
-                ConcurrentHashMap<Long, FutureContext> futureMap = blockMetaData.getFutureMap();
-                if (futureMap == null) {
-                    log.error("fileFromOffset={},blockIndex={},futureMap is null", fileFromOffset, blockIndex);
-                    continue;
-                }
-                //如果可以读int并且是正常数据则读取
-                //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
-                while (true) {
-                    FutureContext futureContext = futureMap.get(blockOffset);
-                    if (endPos - curPos <= DataStruct.HEADER_LENGTH) {
-                        break;
-                    }
-                    int magic = mappedFile.getIntFromDataArea(curPos);
-                    curPos += 4;
-                    if (magic != DataStruct.MAGIC_NUMBER) {
-                        break;
-                    }
-                    int chackSum = mappedFile.getIntFromDataArea(curPos);
-                    curPos += 4;
-                    int dataLen = mappedFile.getIntFromDataArea(curPos);
-                    curPos += 4;
-                    byte[] orgData = mappedFile.getOrgDataFromDataArea(curPos, dataLen);
-                    curPos += (dataLen + 3) & ~3;
-                    crc.update(orgData);
-                    int cs = (int) crc.getValue();
-                    if (cs != chackSum) {
-                        //说明数据不对，后面的数据不用恢复了
-                        break;
-                    }
-                    //调用API正常恢复数据
-                    cacheBlockManager.appendData(new HeapBlockDataStruct(mappedFile, blockIndex, orgData, 0, dataLen), futureContext, false);
-                    blockOffset += DataStruct.HEADER_LENGTH + ((dataLen + 3) & ~3);
-                    crc.reset();
-                }
             } catch (Exception e) {
-                log.error("getBlockBrokenTask failed=>", e);
+                log.error("Block recovery failed; retain WAL for repair", e);
             } finally {
-                mappedFile.release();
+                if (file != null) file.release();
+                if (block != null) cacheBlockManager.finishRecovery(block, recovered);
             }
         }
     }
 
+    public void beginClosing() {
+        synchronized (admissionLock) {
+            if (state == WriterState.RUNNING) state = WriterState.CLOSING;
+        }
+    }
+
+    public void awaitWrites(long deadline) throws InterruptedException {
+        synchronized (admissionLock) {
+            while (inFlightWrites != 0) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) throw new IllegalStateException("Timed out waiting for bucket writes: " + bucketName);
+                admissionLock.wait(remaining);
+            }
+        }
+    }
+
+    public void awaitRecovery(long deadline) throws InterruptedException {
+        while (blockMetaDataManager.hasPendingRecovery()) {
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException("Timed out waiting for block recovery: " + bucketName);
+            }
+            Thread.sleep(10);
+        }
+    }
+
     public void close() {
-        this.state = WriterState.CLOSING;
+        beginClosing();
+        active = false;
         getBlockBrokenTaskThread.interrupt();
+        boolean interrupted = false;
+        while (getBlockBrokenTaskThread.isAlive()) {
+            try {
+                getBlockBrokenTaskThread.join();
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+        }
+        state = WriterState.CLOSED;
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     public MappedFileManager getMappedManager() {

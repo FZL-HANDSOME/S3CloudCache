@@ -78,14 +78,10 @@ public class BlockMetaDataManager {
     }
 
     public void deleteFileAllBlockMetaData(long fileFromOffset) {
-        int blockIndex = 0;
-        while (true) {
-            Long key = ProjectUtil.buildBlockKey(fileFromOffset, blockIndex);
-            if (!metaDataMap.containsKey(key)) {
-                return;
-            }
-            metaDataMap.remove(key);
-            blockIndex++;
+        // 重启恢复会跳过已经上传的块，元数据索引可能是 1、3、7，而不是从 0 连续存在。
+        // BlockKey 的低 10 位最多表示 1024 个索引；遍历这个固定小范围，不能遇空洞就停止。
+        for (int blockIndex = 0; blockIndex < 1024; blockIndex++) {
+            metaDataMap.remove(ProjectUtil.buildBlockKey(fileFromOffset, blockIndex));
         }
     }
 
@@ -133,7 +129,7 @@ public class BlockMetaDataManager {
 
     //检查该block的元数据，看看是否全部数据写入到操作系统的PageCache中
     public boolean isAllDataWriteInPageCache(BlockMetaData blockMetaData) {
-        if (blockMetaData.getState() == BlockMetaData.SEALED
+        if (blockMetaData.getState() != BlockMetaData.OPEN
                 && blockMetaData.getExpectedBytes() == blockMetaData.getPageCacheBytes()) {
             return true;
         }
@@ -165,18 +161,14 @@ public class BlockMetaDataManager {
         if (blockMetaData == null) {
             blockMetaData = getBlockMetaData(fileFromOffset, blockIndex);
         }
-        if (blockMetaData.getState() == BlockMetaData.SEALED) {
-            return 0;
-        }
+        if (blockMetaData == null) return 0;
         int ans = 0;
         synchronized (blockMetaData) {
-            if (blockMetaData.getState() == BlockMetaData.SEALED) {
-                return 0;
-            }
             //seal和broken状态存在竞争关系
             blockMetaData.trySeal();
             //wal文件写完了，检测一下物理block是否破损，如果破损则可以开始恢复数据
-            if (blockMetaData.isBroken() && !blockMetaData.isBrokenSubmit()) {
+            if (blockMetaData.getState() == BlockMetaData.SEALED
+                    && blockMetaData.isBroken() && !blockMetaData.isBrokenSubmit()) {
                 //如果破损了则将2位置设置为1
                 ans = ans | (1 << 2);
             }
@@ -198,7 +190,8 @@ public class BlockMetaDataManager {
     //将对应的元数据设置为Broke
     public void setTaskToRecoverQueue(final BlockMetaData blockMetaData, long fileFromOffset, int blockIndex) {
         synchronized (blockMetaData) {
-            if (blockMetaData.getState() != BlockMetaData.SEALED) {
+            if (blockMetaData.getState() != BlockMetaData.SEALED || !blockMetaData.isBroken()
+                    || blockMetaData.isRecovering()) {
                 return;
             }
             int isBroken = blockMetaData.getIsBroken();
@@ -243,8 +236,9 @@ public class BlockMetaDataManager {
         if (blockMetaData == null) {
             return;
         }
-        blockMetaData.markUploadFailed();
-        deadDataQueue.submit(deadDataInfo);
+        if (blockMetaData.markUploadFailed()) {
+            deadDataQueue.submit(deadDataInfo);
+        }
     }
 
     /**
@@ -276,8 +270,7 @@ public class BlockMetaDataManager {
         if (metaData == null) {
             return false;
         }
-        return metaData.getState() == 1 && metaData.getExpectedBytes() == metaData.getPageCacheBytes()
-                && metaData.getPageCacheBytes() == metaData.getFinishedBytes();
+        return metaData.canUpload();
     }
 
     //将所有open的block封口
@@ -285,6 +278,20 @@ public class BlockMetaDataManager {
         for (BlockMetaData metaData : metaDataMap.values()) {
             if (metaData.getState() == BlockMetaData.OPEN) {
                 metaData.trySeal();
+            }
+        }
+    }
+
+    public boolean hasPendingRecovery() {
+        return metaDataMap.values().stream().anyMatch(meta -> meta.isRecovering()
+                || (meta.getState() == BlockMetaData.SEALED && meta.isBroken()));
+    }
+
+    public void failUncommittedFutures() {
+        for (BlockMetaData meta : metaDataMap.values()) {
+            if (meta.getState() != BlockMetaData.SUCCESS) {
+                meta.markUploadFailed();
+                meta.failAllFuture();
             }
         }
     }

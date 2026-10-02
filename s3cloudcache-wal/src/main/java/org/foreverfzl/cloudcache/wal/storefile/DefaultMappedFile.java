@@ -73,6 +73,8 @@ public class DefaultMappedFile extends AbstractMappedFile {
     protected volatile int readBlockIndex = 0; //readPosition指针期望下次更新index
     public static final AtomicIntegerFieldUpdater<DefaultMappedFile> NEXT_READ_INDEX_UPDATER;
     protected static volatile int forceSize = 2 * 1024 * 1024; //每次刷盘大小
+    // 保留头部的前 64 字节给位置等元数据。每块一个持久化确认字节，兼容旧文件中的零填充。
+    private static final long UPLOADED_BLOCKS_OFFSET = 64;
 
     //如果该文件的指针更新了该属性会被设置为1，然后MappedFileManager有专门的线程去更新该文件的元数据，更新完成后设置为0;
     public volatile int metaDirty;
@@ -93,6 +95,10 @@ public class DefaultMappedFile extends AbstractMappedFile {
 
 
     public DefaultMappedFile(final String dirPath, final String fileName, final long fileFromOffset, final long fileSize, File file, final int blockSize, boolean isWarm, boolean isLockMemory, MappedFileManager manager) {
+        if (blockSize <= 0 || (blockSize & (blockSize - 1)) != 0
+                || fileSize <= 0 || fileSize % blockSize != 0 || fileSize / blockSize > 1024) {
+            throw new IllegalArgumentException("WAL requires a power-of-two blockSize, an integral block count, and at most 1024 blocks");
+        }
         this.posActive = true;
         this.fileName = fileName;
         this.fileSize = fileSize;
@@ -154,7 +160,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             fileChannel = randomAccessFile.getChannel();
             mappedMemorySegment = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, physicalFileSize, arena);
             // 4. 按需预热
-            if (isWarm) {
+            if (isWarm && !fileExists) {
                 // 进行文件预热，每 16384 页（64MB）刷盘一次，防止脏页过多
                 warm(16384, isLockMemory);
             }
@@ -167,11 +173,11 @@ public class DefaultMappedFile extends AbstractMappedFile {
     /**
      * 推进read指针的更新，目前read指针的更新没有涉及到多线程争抢
      */
-    public void ackReadPosition() {
+    public synchronized void ackReadPosition() {
         while (true) {
-            if (!posActive) return;
+            if (!posActive || isCleanup()) return;
             int curReadBlockIndex = NEXT_READ_INDEX_UPDATER.get(this);
-            if (curReadBlockIndex == totalBlockCount) {
+            if (curReadBlockIndex >= totalBlockCount) {
                 return;
             }
             short state = (short) SHORT_ARRAY_HANDLE.getVolatile(this.blockStateArray, curReadBlockIndex);
@@ -181,27 +187,23 @@ public class DefaultMappedFile extends AbstractMappedFile {
             }
             long curReadPosition = READ_POSITION_UPDATER.get(this);
             long expectedNewPosition = (curReadBlockIndex + 1L) * blockSize;
-            int count = (int) ProjectUtil.divideByPower(blockSize, forceSize);
-            MemorySegment target = null;
             long curPos = curReadPosition;
-            boolean isSuccess = true;
             try {
-                for (int i = 0; i < count; i++) {
-                    target = mappedMemorySegment.asSlice(FileMetaInfo.FILE_META_SIZE + curPos, forceSize);
+                while (curPos < expectedNewPosition) {
+                    long length = Math.min(forceSize, expectedNewPosition - curPos);
+                    MemorySegment target = mappedMemorySegment.asSlice(FileMetaInfo.FILE_META_SIZE + curPos, length);
                     target.force();
-                    curPos += forceSize;
+                    curPos += length;
                 }
             } catch (Exception e) {
-                isSuccess = false;
                 log.warn("fileName= {} ackReadPosition failed,newReadpos= {}.  ", this.fileFromOffset, expectedNewPosition,e);
+                return; // 保留原位点，由下一次刷盘重试；禁止在失败位置无限自旋。
             }
             //刷盘成功更新指针
-            if (isSuccess) {
-                READ_POSITION_UPDATER.set(this, expectedNewPosition);
-                NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
-                DIRTY_UPDATER.set(this, 1);
-                log.info("fileName= {} ackReadPosition successfully,newReadpos= {}", this.fileFromOffset, expectedNewPosition);
-            }
+            READ_POSITION_UPDATER.set(this, expectedNewPosition);
+            NEXT_READ_INDEX_UPDATER.incrementAndGet(this);
+            DIRTY_UPDATER.set(this, 1);
+            log.info("fileName= {} ackReadPosition successfully,newReadpos= {}", this.fileFromOffset, expectedNewPosition);
         }
     }
 
@@ -210,7 +212,12 @@ public class DefaultMappedFile extends AbstractMappedFile {
      *
      * @param logicalIndex 当前完成上传的 Block 在本文件内部的逻辑序号 (0, 1, 2...)
      */
-    public void ackUpLoadPosition(int logicalIndex) {
+    public synchronized void ackUpLoadPosition(int logicalIndex) {
+        checkBlockIndex(logicalIndex);
+        if (isCleanup()) throw new WalException("Cannot acknowledge a cleaned WAL file");
+        // 必须先持久化单块确认，调用方随后才能完成用户 Future。连续水位线无法表达乱序上传。
+        mappedMemorySegment.set(ValueLayout.JAVA_BYTE, UPLOADED_BLOCKS_OFFSET + logicalIndex, (byte) 1);
+        mappedMemorySegment.asSlice(0, FileMetaInfo.FILE_META_SIZE).force();
         // 1. 物理填坑：利用 VarHandle 的 Volatile 语义写入，确保其他 CPU 核心立即可见
         setBlockStateArrayFinishedUpLoad(logicalIndex);
         //每个线程都去看一下是否能进行更新
@@ -218,7 +225,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
             if (!posActive) return;
             // 在循环外固定当前要检查的索引
             int currentIndex = NEXT_UPLOAD_INDEX_UPDATER.get(this);
-            if (currentIndex == totalBlockCount) {
+            if (currentIndex >= totalBlockCount) {
                 return;
             }
             // 检查当前索引位置是否已填坑
@@ -243,6 +250,42 @@ public class DefaultMappedFile extends AbstractMappedFile {
             } else {
                 break;
             }
+        }
+    }
+
+    /** 恢复所有与位置关联的内存账本；旧格式文件按连续上传位点推断已完成块。 */
+    public synchronized void restorePositions(long persistedReadPosition, long persistedUploadPosition) {
+        if (persistedReadPosition < 0 || persistedUploadPosition < 0
+                || persistedReadPosition > fileSize || persistedUploadPosition > fileSize
+                || persistedReadPosition % blockSize != 0 || persistedUploadPosition % blockSize != 0) {
+            throw new WalException("Invalid WAL positions in " + fileName);
+        }
+        readPosition = Math.max(persistedReadPosition, persistedUploadPosition);
+        wrotePosition = readPosition;
+        upLoadPosition = persistedUploadPosition;
+        readBlockIndex = (int) (readPosition / blockSize);
+        nextUploadBlockIndex = (int) (upLoadPosition / blockSize);
+        for (int i = 0; i < totalBlockCount; i++) {
+            boolean uploaded = i < nextUploadBlockIndex
+                    || mappedMemorySegment.get(ValueLayout.JAVA_BYTE, UPLOADED_BLOCKS_OFFSET + i) == 1;
+            SHORT_ARRAY_HANDLE.setVolatile(blockStateArray, i,
+                    uploaded ? (short) 3 : i < readBlockIndex ? (short) 1 : (short) 0);
+        }
+        while (nextUploadBlockIndex < totalBlockCount && isBlockUploaded(nextUploadBlockIndex)) {
+            nextUploadBlockIndex++;
+            upLoadPosition = (long) nextUploadBlockIndex * blockSize;
+        }
+        DIRTY_UPDATER.set(this, 1);
+    }
+
+    public boolean isBlockUploaded(int blockIndex) {
+        checkBlockIndex(blockIndex);
+        return (short) SHORT_ARRAY_HANDLE.getVolatile(blockStateArray, blockIndex) == 3;
+    }
+
+    private void checkBlockIndex(int blockIndex) {
+        if (blockIndex < 0 || blockIndex >= totalBlockCount) {
+            throw new IllegalArgumentException("Invalid WAL block index: " + blockIndex);
         }
     }
 
@@ -351,70 +394,32 @@ public class DefaultMappedFile extends AbstractMappedFile {
                 }
                 newPos = currentPos + msgSize;
                 logicalIndex = Math.toIntExact(ProjectUtil.divideByPower(currentPos, blockSize));
-                // 检查该数据是否跨逻辑Block了。currentPos & (this.blockSize - 1)等价于 currentPos%blockSize
                 blockOffset = currentPos & (this.blockSize - 1);
                 remainingInBlock = this.blockSize - blockOffset;
-                long paddingPos;
-                if (msgSize > remainingInBlock) {
-                    // 发现空间不够写整条消息，强行将写指针推到当前 Block 的绝对终点（即下一个 Block 的起点）
-                    paddingPos = currentPos + remainingInBlock;
-                    //看看文件是否结尾
-                    // 尝试 CAS 抢占这段残渣空间用来做 Padding
-                    if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                        //将该block设置为封口，并根据返回的位掩码处理后续动作
-                        // bit0=数据已全部落入PageCache(可推进read指针)
-                        // bit1=该Block已满足上传条件(投递上传任务)
-                        // bit2=该Block物理写入损坏(投递恢复任务)
-                        int sealResult = blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex);
-                        if ((sealResult & 1) == 1) {
-                            setBlockStateArrayFinishedPageCache(logicalIndex);
+                BlockMetaData reservationMeta = blockMetaDataManager.getOrCreate(fileFromOffset, logicalIndex);
+                // 与空闲封口、写满封口使用同一个元数据锁。复制字节不持锁，只有预留和登记是原子的。
+                synchronized (reservationMeta) {
+                    if (WROTE_POSITION_UPDATER.get(this) != currentPos) continue;
+                    if (msgSize > remainingInBlock || reservationMeta.getState() != BlockMetaData.OPEN) {
+                        long paddingPos = currentPos + remainingInBlock;
+                        if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
+                            sealBlock(logicalIndex);
+                            if (paddingPos == this.fileSize) {
+                                close();
+                                return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
+                            }
                         }
-                        if ((sealResult & (1 << 1)) == (1 << 1)) {
-                            // 关键修复：封口时若 expectedBytes==pageCacheBytes==finishedBytes 已对齐，
-                            // 必须主动投递上传任务。否则最后一个业务线程的 releaseReference 已先于封口执行，
-                            // 该Block会永远停留在"已封口且字节对齐但无人触发上传"的状态。
-                            blockMetaDataManager.setTaskToUpdateQueue(this.fileFromOffset, logicalIndex);
-                        }
-                        if ((sealResult & (1 << 2)) == (1 << 2)) {
-                            blockMetaDataManager.setTaskToRecoverQueue(blockMetaDataManager.getBlockMetaData(this.fileFromOffset, logicalIndex), this.fileFromOffset, logicalIndex);
-                        }
-                        //如果是文件结尾则直接返回
-                        if (paddingPos == this.fileSize) {
-                            close(); //关闭文件
-                            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
-                        }
-                        // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
                         continue;
                     }
-                    Thread.onSpinWait();
-                    continue;
-                }
-                //检查该block是否已经封口，或者对应的Block已经Broken了
-                if (blockMetaDataManager.isSealed(this.fileFromOffset, logicalIndex)) {
-                    //封口了则尝试将指针设置为下一个Block起点
-                    paddingPos = currentPos + remainingInBlock;
-                    // 尝试 CAS 抢占这段残渣空间用来做 Padding
-                    if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, paddingPos)) {
-                        //如果是文件结尾则直接返回
-                        if (paddingPos == this.fileSize) {
-                            close(); //关闭文件
-                            return AppendMessageResult.fail(this, AppendMessageResult.AppendStatus.END_OF_FILE, this.fileFromOffset);
-                        }
-                        // 核心：当前线程的真实业务数据并未写成功，必须继续循环去抢占下一个全新 Block 的空间
-                        continue;
+                    if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
+                        reservationMeta.addExpectedBytes(dataStruct.getDataLen());
+                        break;
                     }
-                    Thread.onSpinWait();
-                }
-                if (WROTE_POSITION_UPDATER.compareAndSet(this, currentPos, newPos)) {
-                    //抢成功跳出循环
-                    break;
                 }
                 // CAS失败，提示CPU这是spin等待
                 Thread.onSpinWait();
             }
             int dataSize = dataStruct.getDataLen();
-            //增加期望字节数
-            blockMetaDataManager.addExpectedBytes(this.fileFromOffset, logicalIndex, dataSize);
             //看看该文件是否超过了水位线,超过水位线触发触发 预创建文件
             if (isCreateNewFile == 0 && newPos >= manager.fileWaterMark && IS_CREATE_NEW_FILE.compareAndSet(this, 0, 1)) {
                 manager.tryCreateNextFileWhenReachFileWaterMark(fileFromOffset + FileMetaInfo.FILE_META_SIZE + fileSize);
@@ -422,35 +427,25 @@ public class DefaultMappedFile extends AbstractMappedFile {
             // 3. CAS 成功，当前线程独占 [currentPos, newPos) 区间，执行真正写入
             //因为文件开头4KB是元数据区域，因此真正的开头为 FILE_META_SIZE+currentPos
             result = doAppend(FileMetaInfo.FILE_META_SIZE + currentPos, msgSize, dataStruct);
+            // 预留后的失败也需要精确定位，供上层完成该块的失败结算。
+            result.setLogicalIndex(logicalIndex);
+            result.setBlockOffset(blockOffset);
             if (result.isOk()) {
-                result.setLogicalIndex(logicalIndex);
-                result.setBlockOffset(blockOffset);
                 //写入成功，增加写入到PageCache字节数
                 blockMetaData = blockMetaDataManager.addPageCacheBytes(this.fileFromOffset, logicalIndex, dataSize);
                 // 本次写入恰好填满当前 Block（blockOffset + msgSize == blockSize）。
                 // 这种情况不会触发上面的“跨 Block 封口”逻辑，必须在这里主动封口，
                 // 否则该 Block 永远停留在 OPEN 状态，数据永远不会被上传（静默丢数据）。
                 if (remainingInBlock==msgSize) {
-                    int sealResult = blockMetaDataManager.trySeal(this.fileFromOffset, logicalIndex);
-                    if ((sealResult & 1) == 1) {
-                        setBlockStateArrayFinishedPageCache(logicalIndex);
-                    }
-                    if ((sealResult & (1 << 1)) == (1 << 1)) {
-                        blockMetaDataManager.setTaskToUpdateQueue(this.fileFromOffset, logicalIndex);
-                    }
-                    if ((sealResult & (1 << 2)) == (1 << 2)) {
-                        blockMetaDataManager.setTaskToRecoverQueue(
-                                blockMetaDataManager.getBlockMetaData(this.fileFromOffset, logicalIndex),
-                                this.fileFromOffset, logicalIndex);
-                    }
+                    sealBlock(logicalIndex);
                 }
             }
         } finally {
-            int release = this.release();
-            if (release == 0 && blockMetaData != null && logicalIndex != -1 && blockMetaDataManager.isAllDataWriteInPageCache(blockMetaData)) {
-                //最后一个线程去检查全部数据是否全部写入到PageCache中
+            if (blockMetaData != null && logicalIndex != -1 && blockMetaDataManager.isAllDataWriteInPageCache(blockMetaData)) {
+                // 文件引用包含外层 Manager 和其他块，不能用引用归零判断本逻辑块是否写完。
                 setBlockStateArrayFinishedPageCache(logicalIndex);
             }
+            this.release();
         }
         return result;
     }
@@ -490,7 +485,7 @@ public class DefaultMappedFile extends AbstractMappedFile {
      * 释放资源的方法
      */
     @Override
-    public void clean() {
+    public synchronized void clean() {
         try {
             if (isCleanup()) {
                 return;
@@ -529,7 +524,9 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     public void setBlockStateArrayFinishedPageCache(int blockIndex) {
-        SHORT_ARRAY_HANDLE.setVolatile(this.blockStateArray, blockIndex, (short) 1);
+        checkBlockIndex(blockIndex);
+        // 写完回调可能迟于上传完成，不能将 3 降回 1。
+        SHORT_ARRAY_HANDLE.compareAndSet(this.blockStateArray, blockIndex, (short) 0, (short) 1);
     }
 
     public void setBlockStateArrayFinishedUpLoad(int blockIndex) {
@@ -537,8 +534,28 @@ public class DefaultMappedFile extends AbstractMappedFile {
     }
 
     //是否清除资源，true代表可以
-    public boolean canClean() {
-        return getRefCount() == 0 && !isAvailable() && readPosition == upLoadPosition;
+    public synchronized boolean canClean() {
+        return !isCleanup() && getRefCount() == 0 && !isAvailable()
+                && readPosition >= wrotePosition && upLoadPosition >= wrotePosition;
+    }
+
+    private void sealBlock(int blockIndex) {
+        BlockMetaDataManager metadata = manager.blockMetaDataManager;
+        BlockMetaData block = metadata.getBlockMetaData(fileFromOffset, blockIndex);
+        if (block == null) return;
+        synchronized (block) {
+            int result = metadata.trySeal(fileFromOffset, blockIndex, block);
+            if ((result & 1) != 0 || metadata.isAllDataWriteInPageCache(block)) {
+                setBlockStateArrayFinishedPageCache(blockIndex);
+            }
+            if ((result & 2) != 0) metadata.setTaskToUpdateQueue(fileFromOffset, blockIndex);
+            if ((result & 4) != 0) metadata.setTaskToRecoverQueue(block, fileFromOffset, blockIndex);
+        }
+    }
+
+    /** 关闭时由停止写入后的管理者调用，封口同时完成刷盘/上传/恢复通知。 */
+    public void sealAllBlocks() {
+        for (int i = 0; i < totalBlockCount; i++) sealBlock(i);
     }
 
     @Override

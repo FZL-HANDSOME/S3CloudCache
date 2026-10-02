@@ -18,28 +18,26 @@ public class FileMetaInfoUtil {
 
     //刷新文件开头4KB元数据区域
     public static void flushFileMetaInfo(DefaultMappedFile mappedFile) {
-        try {
-            long fileFromOffset = mappedFile.fileFromOffset;
-            long readPos = mappedFile.readPosition;
-            long uploadPos = mappedFile.upLoadPosition;
-            // Use file creation time if needed; fall back to current time.
-            long updateTime = System.currentTimeMillis();
-            // Write into the first 4KB of the mapped file.
-            MemorySegment metaSegment = mappedFile.getMappedMemorySegmentSlice(0, FileMetaInfo.FILE_META_SIZE);
-            long pos = 0;
-            metaSegment.set(ValueLayout.JAVA_LONG, pos, readPos);
-            pos += Long.BYTES;
-            metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
-            pos += Long.BYTES;
-            metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
-            log.info("fileName= {} flushFileMetaInfo successfully, readPos={},uploadPos={},updateTime={}", fileFromOffset, readPos, uploadPos, updateTime);
-            // Ensure durability.
-            metaSegment.force();
-            if (mappedFile.readPosition == readPos && mappedFile.upLoadPosition == uploadPos) {
-                DefaultMappedFile.DIRTY_UPDATER.compareAndSet(mappedFile, 1, 0);
+        synchronized (mappedFile) {
+            if (mappedFile.isCleanup()) return;
+            try {
+                long fileFromOffset = mappedFile.fileFromOffset;
+                long readPos = mappedFile.readPosition;
+                long uploadPos = mappedFile.upLoadPosition;
+                long updateTime = System.currentTimeMillis();
+                MemorySegment metaSegment = mappedFile.getMappedMemorySegmentSlice(0, FileMetaInfo.FILE_META_SIZE);
+                long pos = 0;
+                metaSegment.set(ValueLayout.JAVA_LONG, pos, readPos);
+                pos += Long.BYTES;
+                metaSegment.set(ValueLayout.JAVA_LONG, pos, uploadPos);
+                pos += Long.BYTES;
+                metaSegment.set(ValueLayout.JAVA_LONG, pos, updateTime);
+                metaSegment.force();
+                DefaultMappedFile.DIRTY_UPDATER.set(mappedFile, 0);
+                log.info("fileName= {} flushFileMetaInfo successfully, readPos={},uploadPos={},updateTime={}", fileFromOffset, readPos, uploadPos, updateTime);
+            } catch (Exception e) {
+                log.warn("flushFileMeta: failed to write meta for {}file offset ", mappedFile.getFileName(), e);
             }
-        } catch (Exception e) {
-            log.warn("flushFileMeta: failed to write meta for {}file offset ", mappedFile.getFileName(), e);
         }
     }
 

@@ -18,6 +18,7 @@ public interface DataStruct {
 
     // 固定魔数 0x53334343 (ASCII "S3CC")
     public static final int MAGIC_NUMBER = 0x53334343;
+    public static final int END_MAGIC_NUMBER = 0x50444444;
 
     // 协议头部长度固定为 16 字节 (4 + 4 + 4)
     public static final long HEADER_LENGTH = 12;

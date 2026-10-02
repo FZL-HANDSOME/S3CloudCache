@@ -71,7 +71,7 @@ A Block is sealed and scheduled for upload when any of the following conditions 
 
 | Scenario                              | Handling                                                                                                                                       |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Process crash / machine failure       | On restart, `start()` scans WAL files and `bucketMeta`, then recovers unuploaded data in `[upLoadPosition, readPosition)` and uploads it again |
+| Process crash / machine failure       | On restart, `start()` scans WAL files, skips Blocks with durable upload acknowledgements, validates unacknowledged Blocks before replay, and retains corrupt WAL for repair |
 | Physical Block write failure          | The affected Block is marked as broken. A background recovery thread re-reads the original data from WAL and rebuilds the Physical Block       |
 | Upload failure after 3 retries        | The Block is placed into the dead-letter queue. The user can retrieve and repair it through `getUpLoadFailedBlockInfo()`                       |
 | Single record larger than `blockSize` | The write is rejected and `WriteResult.isSuccess() == false`                                                                                   |
@@ -280,10 +280,11 @@ public class WriteResult {
 
 ### Semantics
 
-* `isSuccess() == true`: The data has been successfully written to the WAL and the off-heap Physical Block, and the Block has been sealed and is about to be (or is already being) uploaded asynchronously to S3.
-* `isSuccess() == false`: The write failed, for example because the WAL write failed or the record is larger than `blockSize`.
+* `isSuccess() == true`: The Block has been uploaded to S3 and its local upload acknowledgement is durable. Only then is `s3Key + offset + size` a committed location.
+* `isSuccess() == false` or an exceptional Future: The write was not acknowledged as successful. Unacknowledged WAL is retained after upload failure for restart or manual recovery; an object may nevertheless exist remotely.
 * One `s3Key` corresponds to one Block. Multiple records in the same Block share the same `s3Key` and are distinguished by their `offset`.
-* Upload is asynchronous. To ensure the data has already reached S3 before querying it, call `instance.close(...)` to wait for all uploads to complete, or implement your own polling / retry mechanism.
+* Upload is asynchronous, but successful Future completion waits for acknowledgement. A partial tail Block waits for idle sealing or `instance.close(...)`; avoid awaiting each individual write immediately in throughput tests.
+* A Block is the minimum commit unit. Unacknowledged data may be reordered during recovery; acknowledged Blocks are not rebuilt and overwritten in WAL order.
 
 ---
 
@@ -335,29 +336,44 @@ The user can retrieve and manually repair the failed Block through `getUpLoadFai
 ```java
 BucketWriterWriter writer = instance.getBucketWriterInstance("my-bucket");
 
-// Block until a failed-upload entry is available
-MappedFileReader reader = writer.getUpLoadFailedBlockInfo();
-
-System.out.println("failed bucket    = " + reader.getBucketName());
-System.out.println("failed s3Key     = " + reader.getS3Key());
-System.out.println("failed logical index = " + reader.getLogicalIndex());
-
-// Option 1: get the entire Block memory view and upload it manually
-MemorySegment segment = reader.getMemorySegment();
-
-// Option 2: read the records one by one
-while (reader.hasNext()) {
-    byte[] record = reader.next();
-    // ...
+// The reader owns a native snapshot and must be closed.
+try (MappedFileReader reader = writer.getUpLoadFailedBlockInfo()) {
+    // All Value Bytes in the entire Block; no protocol headers or padding.
+    MemorySegment values = reader.readAll();
+    var response = instance.s3RawPutObject(reader.getBucketName(), reader.getS3Key(), values);
+    if (response.eTag() == null || response.eTag().isBlank()) {
+        throw new IllegalStateException("Upload was not confirmed; retain WAL");
+    }
+    reader.ackUpLoadPosition(); // close() never acknowledges the WAL automatically.
 }
-
-// After the upload succeeds, acknowledge the upload position
-reader.ackUpLoadPosition();
 ```
 
 > **Important:** `ackUpLoadPosition()` must only be called after the Block has been successfully uploaded.
 >
 > Otherwise, the upload position will remain stuck and the corresponding WAL file cannot be safely deleted.
+> `hasNext()/next()` iterate Values. `readAll()` always represents the entire Block, regardless of the cursor. `getMemorySegment()` includes WAL headers and is not the Value-only upload body. Returned native views expire when the Reader closes; acknowledge before closing the Instance. Corrupt or incomplete Blocks fail instead of returning a valid prefix as a complete Block.
+
+# 8. Integrity Regression Tests and Upgrade Boundaries
+
+Run `mvn test` from the repository root with JDK 25 or newer (`mvn -o test` when dependencies are cached).
+`IntegrityRegressionTest` runs isolated fault scenarios in `S3CloudCacheInstanceText`, alongside the WAL tests: concurrent heap/native writes, slices, shutdown tails, upload failure and restart, broken physical Block recovery, and stable acknowledged locations. Tests use temporary directories and an in-memory S3 client, not existing WAL or a real server, and compare record IDs, lengths, returned locations and every payload byte.
+
+* The reserved WAL header now stores per-Block upload acknowledgements. A checksummed `next-file-offset` file in each Bucket directory prevents file number reuse; do not delete it independently.
+* Legacy WAL has no per-Block acknowledgements beyond its contiguous upload position. An already emptied legacy directory without a sequence file also has no recoverable historical number. Resolve outstanding legacy tasks before upgrade and use a new instance name or Key prefix when historical numbers are unknown.
+* Outstanding WAL must first be recovered using its original Block size, file size and Key prefix; configuration changes fail closed.
+* Corrupt WAL is retained instead of uploading its valid prefix as a complete Block. Repair or manual handling is required. These offline tests do not replace real S3, process-kill or power-loss validation.
+* Newly created `bucketMeta` files use V2 and a full-field CRC, including a 64-bit file size. Same-configuration legacy metadata remains readable without in-place migration. V2 cannot be handed back to older binaries; drain and back up before downgrading. Corrupt, truncated and unknown-version metadata now fail explicitly.
+
+# 9. Maintenance Constraints
+
+* `BlockMetaData` snapshots results under its lock and dispatches each Future on an independent virtual thread. Synchronous callbacks may close the Instance or await sibling Futures; never run them serially on the upload/recovery thread. Shutdown waits for storage work, not arbitrary user callbacks.
+* Instance construction deep-copies and validates all configuration before starting threads, allocating native memory or creating files. Mutating the caller's configuration is not a live reconfiguration mechanism. Instance and Bucket names must be single path components.
+* `.instance.lock` provides OS-level exclusivity for one local instance directory. Keep it held when shutdown must be retried; release only after resources stop, and never delete the lock file while running. This is not a distributed S3 namespace lock.
+* V2 metadata keeps the 24-byte fixed header. Its first int is `0x424D0200 | dirty`; preserve the version bits when updating dirty. CRC covers all bytes of block size, file size, prefix length and prefix, excluding mutable dirty. Existing compatible files are remapped, not truncated; allowed configuration replacement is atomic after forcing a temporary file. Legacy CRC remains weak for compatibility.
+* Manual recovery owns a read-only snapshot, uses the same whole-Block validation as startup recovery, and checks the accepted byte count. Reading/closing does not acknowledge a Block. Use `readAll()` for Value-only upload and acknowledge only after remote success.
+* Recovered metadata may have missing indices because committed Blocks are skipped. File cleanup must cover all 1024 possible indices, not stop at the first missing entry.
+
+Focused tests are `FutureNotificationRegressionTest`, `ConfigurationSafetyTest`, `InstanceDirectoryLockTest` (including a separate JVM), `BucketMetaInfoCompatibilityTest`, `ManualRecoveryReaderTest`, and `BlockMetadataCleanupTest`.
 
 
 ———————————————————————————————————————

@@ -7,10 +7,11 @@ import org.foreverfzl.cloudcache.core.global.CoreInstanceBucketManager;
 import org.foreverfzl.cloudcache.core.manager.CacheBlockManager;
 import org.foreverfzl.cloudcache.metadata.manager.BlockMetaDataManager;
 import org.foreverfzl.cloudcache.storage.instance.bucket.BucketWriterWriter;
+import org.foreverfzl.cloudcache.storage.instance.bucket.WalBlockReader;
+import org.foreverfzl.cloudcache.metadata.entity.BlockMetaData;
 import org.foreverfzl.cloudcache.wal.Util.BucketMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.Util.FileMetaInfoUtil;
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
-import org.foreverfzl.cloudcache.wal.datastruct.DataStruct;
 import org.foreverfzl.cloudcache.wal.datastruct.FileMetaInfo;
 import org.foreverfzl.cloudcache.wal.global.WalInstanceBucketManager;
 import org.foreverfzl.cloudcache.wal.manager.MappedFileManager;
@@ -27,19 +28,20 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
 
-import java.io.File;
 import java.lang.foreign.MemorySegment;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.stream.Stream;
-import java.util.zip.CRC32;
 
 
 public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
@@ -68,37 +70,60 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     private final ConcurrentHashMap<String, BucketWriterWriter> bucketWriters = new ConcurrentHashMap<>();
 
     private final S3Client s3Client;
+    private final InstanceDirectoryLock directoryLock;
 
     /**
      * 全局数据恢复异步任务句柄
      */
     private volatile CompletableFuture<Void> recoveryFuture;
+    private volatile Throwable recoveryFailure;
+    private final Object lifecycleLock = new Object();
+    private boolean started;
+    private boolean closing;
+    private boolean closed;
 
 
     public S3CloudCacheInstance(S3Client s3Client, S3CloudCacheConfig config) {
         this.s3Client = s3Client;
-        this.config = config;
-        this.instanceName = config.instanceName;
-        config.walPath = config.walPath != null ? config.walPath + ProjectUtil.WAL_FILE_ADDRESS : ProjectUtil.USER_HOME + ProjectUtil.WAL_FILE_ADDRESS;
-        walInstanceBucketManager = new WalInstanceBucketManager(instanceName, config);
-        coreInstanceBucketManager = new CoreInstanceBucketManager(instanceName, s3Client, config);
+        // 先完整校验并深拷贝，禁止外部修改配置改变已运行实例的 WAL/Block 布局。
+        this.config = java.util.Objects.requireNonNull(config, "config").snapshotAndValidate();
+        this.config.walPath = (this.config.walPath != null ? this.config.walPath : ProjectUtil.USER_HOME)
+                + ProjectUtil.WAL_FILE_ADDRESS;
+        this.instanceName = this.config.instanceName;
+        // 必须早于恢复、预创建文件和后台线程：同目录只能有一个拥有者（包括不同进程）。
+        this.directoryLock = InstanceDirectoryLock.acquire(Paths.get(this.config.walPath, instanceName));
+        WalInstanceBucketManager initializedWal = null;
+        try {
+            initializedWal = new WalInstanceBucketManager(instanceName, this.config);
+            coreInstanceBucketManager = new CoreInstanceBucketManager(instanceName, s3Client, this.config);
+            walInstanceBucketManager = initializedWal;
+        } catch (RuntimeException | Error failure) {
+            // 构造失败时对象不会交给用户，不能依赖用户调用 close 释放锁和线程。
+            if (initializedWal != null) {
+                try { initializedWal.close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+            }
+            try { directoryLock.close(); } catch (Exception cleanup) { failure.addSuppressed(cleanup); }
+            throw failure;
+        }
     }
 
     /**
      * 获取BucketName对应的Bucket操作句柄
      */
     public BucketWriterWriter getBucketWriterInstance(String bucketName) {
-        if (bucketName == null || bucketName.isBlank()) {
-            throw new CloudCacheException("bucketName can not null");
+        S3CloudCacheConfig.validatePathComponent(bucketName, "bucketName");
+        synchronized (lifecycleLock) {
+            if (closing) throw new CloudCacheException("Instance is closing");
+            if (!started) start();
+            if (recoveryFailure != null || (recoveryFuture != null && recoveryFuture.isCompletedExceptionally())) {
+                throw new CloudCacheException("WAL recovery failed; repair the retained WAL before accepting new writes");
+            }
+            return bucketWriters.computeIfAbsent(bucketName, name -> {
+                MappedFileManager wal = walInstanceBucketManager.getOrCreateBucketFileManager(name);
+                CacheBlockManager core = coreInstanceBucketManager.getOrCreateBlockManager(name, wal.blockMetaDataManager);
+                return new BucketWriterWriter(name, wal, core, wal.blockMetaDataManager, this);
+            });
         }
-        BucketWriterWriter bucketWriterWriter = bucketWriters.get(bucketName);
-        if (bucketWriterWriter != null) return bucketWriterWriter;
-        //去容器中看看有没有对应的manager，有则返回，没有则创建
-        MappedFileManager bucketWalManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName);
-        CacheBlockManager bucketCoreManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, bucketWalManager.blockMetaDataManager);
-        bucketWriterWriter = new BucketWriterWriter(bucketName, bucketWalManager, bucketCoreManager, bucketWalManager.blockMetaDataManager, this);
-        bucketWriters.put(bucketName, bucketWriterWriter);
-        return bucketWriterWriter;
     }
 
     /**
@@ -127,13 +152,22 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     //启动数据恢复
     @Override
     public void start() {
+        synchronized (lifecycleLock) {
+            if (closing) throw new CloudCacheException("Instance is closing");
+            if (started) return;
+            started = true;
+            startRecovery();
+        }
+    }
+
+    private void startRecovery() {
         Path instancePath = Paths.get(config.walPath, instanceName);
         if (!Files.exists(instancePath)) {
             this.recoveryFuture = CompletableFuture.completedFuture(null);
             return;
         }
         try (Stream<Path> list = Files.list(instancePath)) {
-            List<Path> bucketPathList = list.toList();
+            List<Path> bucketPathList = list.filter(Files::isDirectory).toList();
             int bucketCount = bucketPathList.size();
             if (bucketCount == 0) {
                 this.recoveryFuture = CompletableFuture.completedFuture(null);
@@ -148,7 +182,9 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                     BucketConfig bucketConfig = config.getBucketConfig(bucketName);
                     this.chackDirectoryAndFile(path, bucketName, bucketConfig, recoverExecutorService, futures);
                 } catch (Exception e) {
+                    recoveryFailure = e;
                     log.error("Recover preparation failed for path: {}", path, e);
+                    futures.add(CompletableFuture.failedFuture(e));
                 }
             }
             if (futures.isEmpty()) {
@@ -168,8 +204,9 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                         recoverExecutorService.shutdown();
                     });
         } catch (Exception e) {
+            recoveryFailure = e;
             log.error("Start async recovery failed for instance: {}", instanceName, e);
-            this.recoveryFuture = CompletableFuture.completedFuture(null);
+            this.recoveryFuture = CompletableFuture.failedFuture(e);
         }
     }
 
@@ -188,6 +225,16 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
          */
         BucketMetaInfo bucketMetaInfo = BucketMetaInfoUtil.readBucketMetaFile(path);
         if (bucketMetaInfo == null) {
+            Path existingWal = path.resolve("wal");
+            if (Files.isDirectory(existingWal)) {
+                try (Stream<Path> files = Files.list(existingWal)) {
+                    if (files.anyMatch(Files::isRegularFile)) {
+                        throw new CloudCacheException("WAL exists but bucketMeta is missing or invalid: " + path);
+                    }
+                } catch (java.io.IOException e) {
+                    throw new CloudCacheException("Cannot inspect outstanding WAL: " + path, e);
+                }
+            }
             return;
         }
         int isDirty = bucketMetaInfo.getIsDirty();
@@ -198,11 +245,10 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
         int oldblockSize = bucketMetaInfo.getBlockSize();
         long oldFileSize = bucketMetaInfo.getFileSize();
         String oldPrefix = new String(bucketMetaInfo.getData(), StandardCharsets.UTF_8);
-        //看看新的BlockSize是否比原来的BlockSize小，如果小的话就不恢复以前的数据
-        //因为我们采用的是最新配置的CacheBlock，如果老配置大于新配置需要多阶段提交上传，这里简单化
-        if (bucketConfig.blockSize < oldblockSize) {
-            log.error("The new block size is smaller than the old block size.bucket recover stop. bucketMeta file path is{}", path);
-            return;
+        // 未提交 WAL 按原布局恢复，不能先以新配置重写 bucketMeta 或扩缩文件。
+        if (bucketConfig.blockSize != oldblockSize || bucketConfig.walFileSize != oldFileSize
+                || !java.util.Objects.equals(bucketConfig.s3KeyPrefix, oldPrefix)) {
+            throw new CloudCacheException("Recover outstanding WAL with its original block/file size and prefix first: " + path);
         }
         /*
          * 2.扫描获取wal目录下的所有文件的绝对路径，如果没有wal则默认不数据恢复
@@ -223,10 +269,14 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
             //创建该bucket对应manager
             MappedFileManager fileManager = walInstanceBucketManager.getOrCreateBucketFileManager(bucketName, endFileFromOffset);
             CacheBlockManager blockManager = coreInstanceBucketManager.getOrCreateBlockManager(bucketName, fileManager.blockMetaDataManager);
+            // 恢复创建的 Bucket 也必须参与关闭和运行时 Block 恢复。
+            bucketWriters.computeIfAbsent(bucketName, name -> new BucketWriterWriter(name, fileManager,
+                    blockManager, fileManager.blockMetaDataManager, this));
             //恢复wal目录下的数据
             futures.add(recoverFile(walFiles, fileManager, blockManager, oldFileSize, oldblockSize, oldPrefix, recoverExecutorService));
         } catch (Exception e) {
             log.error("path={} recover failed", path, e);
+            throw new CloudCacheException("Cannot prepare WAL recovery: " + path, e);
         }
     }
 
@@ -235,92 +285,81 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
                                                 CacheBlockManager recoverBlockManager, long oldFileSize,
                                                 int oldblockSize, String prefix,
                                                 ExecutorService recoverExecutorService) {
-        return CompletableFuture.runAsync(
-                () -> doRecoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, prefix),
-                recoverExecutorService
-        ).exceptionally(ex -> {
-            return null;
-        });
+        return CompletableFuture.runAsync(() -> {
+            try {
+                doRecoverFile(walFiles, fileManager, recoverBlockManager, oldFileSize, oldblockSize, prefix);
+            } catch (Exception e) {
+                recoveryFailure = e;
+                throw e;
+            }
+        }, recoverExecutorService);
     }
 
-    private void doRecoverFile(List<Path> walFiles, MappedFileManager fileManager, CacheBlockManager recoverBlockManager, long oldFileSize, int oldblockSize, String prefix) {
-        CRC32 crc32 = new CRC32();
-        //遍历所有的文件并且读取前4KB数据并创建文件，然后进行数据恢复
-        long curPos = 0;
-        long endPos = 0;
-        for (Path curPath : walFiles) {
-            String fileName = curPath.getFileName().toString();
-            long fileFromOffset = Long.parseLong(fileName);
+    private void doRecoverFile(List<Path> walFiles, MappedFileManager fileManager,
+                               CacheBlockManager blockManager, long oldFileSize, int oldBlockSize, String prefix) {
+        for (Path path : walFiles) {
+            long fileOffset = getFileFromOffset(path);
+            DefaultMappedFile file = new DefaultMappedFile(path.getParent().toString(), path.getFileName().toString(),
+                    fileOffset, oldFileSize, path.toFile(), oldBlockSize, false, false, fileManager);
+            file.hold();
             try {
-                File file = curPath.toFile();
-                //创建该文件的Java对象
-                DefaultMappedFile defaultMappedFile = new DefaultMappedFile(curPath.getParent().toString(), fileName, fileFromOffset, oldFileSize, file, oldblockSize, false, false, fileManager);
-                //获取该文件对应的元数据
-                FileMetaInfo fileMetaInfo = FileMetaInfoUtil.getFileMetaInfo(defaultMappedFile);
-                if (fileMetaInfo == null) {
-                    continue;
-                }
-                long readPosition = fileMetaInfo.getReadPosition();
-                long upLoadPosition = fileMetaInfo.getUploadPosition();
-                defaultMappedFile.wrotePosition = readPosition;
-                defaultMappedFile.readPosition = readPosition;
-                defaultMappedFile.upLoadPosition = upLoadPosition;
-                //将该文件添加到manage中
-                fileManager.addMappedFile(defaultMappedFile);
-                //不需要恢复数据，将文件关闭，让后台线程自己检测删除
-                if (readPosition <= upLoadPosition) {
-                    defaultMappedFile.close();
-                    continue;
-                }
-                //需要数据恢复的文件，读取文件指定区域数据进行恢复
-                curPos = upLoadPosition;
-                int blockCount = (int) ProjectUtil.divideByPower((readPosition - upLoadPosition), oldblockSize);
-                //获取元数据管路者
-                BlockMetaDataManager blockMetaDataManager = fileManager.blockMetaDataManager;
-                for (int i = 1; i <= blockCount; i++) {
-                    endPos = curPos + oldblockSize;
-                    int blockIndex = Math.toIntExact(ProjectUtil.divideByPower(curPos, oldblockSize));
-                    //如果可以读int并且是正常数据则读取
-                    //如果一个Block结束了会在结尾打上end标志，end标志占用4字节，如果结尾位置4字节都不够默认就是结束了
-                    while (true) {
-                        if (endPos - curPos <= DataStruct.HEADER_LENGTH) {
-                            break;
-                        }
-                        int magic = defaultMappedFile.getIntFromDataArea(curPos);
-                        curPos += 4;
-                        if (magic != DataStruct.MAGIC_NUMBER) {
-                            break;
-                        }
-                        int checksum = defaultMappedFile.getIntFromDataArea(curPos);
-                        curPos += 4;
-                        int valueLen = defaultMappedFile.getIntFromDataArea(curPos);
-                        curPos += 4;
-                        byte[] orgData = defaultMappedFile.getOrgDataFromDataArea(curPos, valueLen);
-                        curPos += (valueLen + 3) & ~3;
-                        crc32.update(orgData);
-                        if ((int) crc32.getValue() != checksum) {
-                            //数据错误直接退出
-                            break;
-                        }
-                        blockMetaDataManager.addExpectedBytes(fileFromOffset, blockIndex, valueLen);
-                        blockMetaDataManager.addPageCacheBytes(fileFromOffset, blockIndex, valueLen);
-                        recoverBlockManager.appendData(new HeapBlockDataStruct(defaultMappedFile, blockIndex, orgData, 0, valueLen), prefix, null, false);
-                        crc32.reset();
+                FileMetaInfo info = FileMetaInfoUtil.getFileMetaInfo(file);
+                file.restorePositions(info.getReadPosition(), info.getUploadPosition());
+                fileManager.addMappedFile(file);
+                int blockCount = Math.toIntExact(oldFileSize / oldBlockSize);
+                for (int index = 0; index < blockCount; index++) {
+                    // 已确认 Block 的布局已交给用户，不得按 WAL 顺序重新覆盖。
+                    if (file.isBlockUploaded(index)) continue;
+                    long blockEnd = (long) (index + 1) * oldBlockSize;
+                    List<WalBlockReader.Record> records;
+                    try {
+                        records = WalBlockReader.readBlock(file, index);
+                    } catch (Exception e) {
+                        // 即便检查点滞后，也不能把一个损坏但非空的 WAL 当作空文件删除。
+                        file.wrotePosition = Math.max(file.wrotePosition, blockEnd);
+                        throw e;
                     }
-                    //尝试封口
-                    int state = blockMetaDataManager.trySeal(fileFromOffset, blockIndex);
-                    //将文件对应block位置设置为1
-                    if ((state & 1) == 1) defaultMappedFile.setBlockStateArrayFinishedPageCache(blockIndex);
-                    //该block数据结束了，将该block上传
-                    CloudCacheBlock block = recoverBlockManager.getExistingBlock(fileFromOffset, blockIndex);
-                    recoverBlockManager.updateBlock(block);
-                    curPos = upLoadPosition + ((long) i * oldblockSize);
+                    if (records.isEmpty()) {
+                        if ((long) index * oldBlockSize < file.readPosition) {
+                            throw new CloudCacheException("Durable WAL Block is empty: " + path + ":" + index);
+                        }
+                        continue;
+                    }
+                    // 也扫描检查点之后的合法记录，数据已写入而文件头尚未更新时仍可恢复。
+                    file.wrotePosition = Math.max(file.wrotePosition, blockEnd);
+                    BlockMetaDataManager metadata = fileManager.blockMetaDataManager;
+                    BlockMetaData meta = metadata.getOrCreate(fileOffset, index);
+                    try {
+                        for (WalBlockReader.Record record : records) {
+                            int length = record.value().length;
+                            metadata.addExpectedBytes(fileOffset, index, length);
+                            metadata.addPageCacheBytes(fileOffset, index, length);
+                            var result = blockManager.appendData(new HeapBlockDataStruct(file, index,
+                                    record.value(), 0, length), prefix, null, false);
+                            if (!result.result()) throw new CloudCacheException("Cannot rebuild WAL Block: " + path + ":" + index);
+                        }
+                        metadata.trySeal(fileOffset, index);
+                        file.setBlockStateArrayFinishedPageCache(index);
+                        blockManager.updateBlock(blockManager.getExistingBlock(fileOffset, index));
+                    } catch (Exception e) {
+                        meta.markUploadFailed();
+                        synchronized (meta) {
+                            CloudCacheBlock block = blockManager.getExistingBlock(fileOffset, index);
+                            if (block != null && block.getBlockMetaData() == meta) {
+                                block.getReference();
+                                block.setDelayClean();
+                                block.releaseReference();
+                            }
+                        }
+                        throw e;
+                    }
                 }
-                //将文件关闭
-                defaultMappedFile.close();
             } catch (Exception e) {
-                log.error("recovering=>{} file created failed", fileFromOffset, e);
+                log.error("WAL recovery failed; original file retained: {}", path, e);
                 throw e;
+            } finally {
+                file.close();
+                file.release();
             }
         }
     }
@@ -331,96 +370,117 @@ public class S3CloudCacheInstance extends AbstractCloudCacheInstance {
     }
 
     @Override
-    public void close(long walWriteWaitTime, long blockWriteWaitTime, long upLoadWaitTime) {
-        // 0. 等待数据恢复任务完成，避免恢复未完成时执行封口和清理导致数据丢失
-        long recoverWaitTime = upLoadWaitTime + walWriteWaitTime;
-        if (this.recoveryFuture != null && !this.recoveryFuture.isDone()) {
-            log.info("Waiting for data recovery to complete before closing instance: {}", instanceName);
-            try {
-                this.recoveryFuture.get(recoverWaitTime, TimeUnit.MILLISECONDS);
-                log.info("Data recovery completed before closing instance: {}", instanceName);
-            } catch (TimeoutException e) {
-                log.warn("Data recovery did not finish within timeout ({} ms) before closing instance: {}", recoverWaitTime, instanceName, e);
-            } catch (Exception e) {
-                log.error("Data recovery encountered an error while waiting in close() for instance: {}", instanceName, e);
-            }
+    public synchronized void close(long walWriteWaitTime, long blockWriteWaitTime, long upLoadWaitTime) {
+        if (walWriteWaitTime < 0 || blockWriteWaitTime < 0 || upLoadWaitTime < 0) {
+            throw new IllegalArgumentException("Close timeouts must be nonnegative");
         }
-        long writeDeadline = System.currentTimeMillis() + walWriteWaitTime;
-        Collection<BucketWriterWriter> writers = bucketWriters.values();
-        // 1. 利用 try-with-resources 自动管理虚拟线程池的生命周期
-        try (ExecutorService closeExecutor = Executors.newVirtualThreadPerTaskExecutor()) {
+        List<BucketWriterWriter> writers;
+        synchronized (lifecycleLock) {
+            if (closed) return;
+            closing = true;
+            writers = List.copyOf(bucketWriters.values());
+            writers.forEach(BucketWriterWriter::beginClosing);
+        }
+        try {
+            // 超时不卸载仍在使用的内存；保持关闭准入，调用方可重试 close。
+            if (recoveryFuture != null) {
+                try {
+                    recoveryFuture.get(walWriteWaitTime + upLoadWaitTime, TimeUnit.MILLISECONDS);
+                } catch (ExecutionException e) {
+                    log.error("Recovery failed; uncommitted WAL will be retained", e.getCause());
+                }
+            }
+            long writeDeadline = System.currentTimeMillis() + walWriteWaitTime + blockWriteWaitTime;
+            for (BucketWriterWriter writer : writers) writer.awaitWrites(writeDeadline);
+            walInstanceBucketManager.stopScheduler();
             for (BucketWriterWriter writer : writers) {
-                closeExecutor.execute(() -> {
-                    try {
-                        // 1：先将所有的 bucket 设置为关闭中，此时在bucket层面拒绝新的数据写入
-                        writer.close();
-                        String bucketName = writer.getBucketName();
-                        CacheBlockManager cacheBlockManager = coreInstanceBucketManager.onlyGetBlockManager(bucketName);
-                        MappedFileManager mappedFileManager = walInstanceBucketManager.onlyGetFileManager(bucketName);
-
-                        //2：停止所有的线程
-                        mappedFileManager.stopAllThread();
-                        cacheBlockManager.stopAllThread();
-
-                        //3：限时等待该 wal 完成写入
-                        mappedFileManager.waitWriterFinished(writeDeadline);
-
-                        //4：关闭所有的文件
-                        mappedFileManager.closeAllFile();
-
-                        //5：限时等待 blockManager的写入完成
-                        long blockWriteDeadline = System.currentTimeMillis() + blockWriteWaitTime;
-                        cacheBlockManager.waitWriterFinished(blockWriteDeadline);
-
-                        //6：关闭所有的block，禁止物理block的写入
-                        cacheBlockManager.closeAllBlock();
-
-                        //7：封口所有的 block
-                        BlockMetaDataManager blockMetaDataManager = cacheBlockManager.blockMetaDataManager;
-                        blockMetaDataManager.trySealAllBlock();
-
-                        //8：限时上传所有的 block
-                        long upLoadDeadline = System.currentTimeMillis() + upLoadWaitTime;
-                        cacheBlockManager.updateAllBlock(upLoadDeadline);
-
-                        //9：刷新读指针
-                        mappedFileManager.endFlushFileReadPosition();
-
-                        //10：禁止所有文件指针进行改动，这样保证了步骤11和12的指针状态是一致的
-                        mappedFileManager.stopUpdateAllFilePosition();
-
-                        //11：强制刷新所有文件的元数据区域
-                        mappedFileManager.endMetaFlush();
-
-                        //12：最后检查一遍文件，把能删除的文件删除
-                        mappedFileManager.endChackMappedFile();
-
-                        //13：若没有剩余文件，修改 bucketMeta 文件的 isDirty 为 0
-                        if (mappedFileManager.mappedFileIsEmpty()) {
-                            MemorySegment bucketMetaFileSegment = mappedFileManager.getBucketMetaFileSegment();
-                            BucketMetaInfoUtil.updateIsDirty(0, bucketMetaFileSegment);
-                        }
-                    } catch (Throwable t) {
-                        log.error("Failed to close bucket writer for bucket: {}", writer.getBucketName(), t);
-                    }
-                });
+                MappedFileManager wal = writer.getMappedManager();
+                wal.stopAllThread();
+                wal.closeAllFile();
+                // 统一封口同时更新 PageCache-ready，失败上传的尾块仍必须持久化。
+                wal.sealAllBlocks();
             }
-        } //执行到这里时，Java 自动调用 closeExecutor.close()，主线程在此强行阻塞，直到所有虚拟线程全部执行完成
-
-        // 所有 Bucket 虚拟线程彻底执行完毕后，安全关闭底层 Manager 全局资源
-        try {
-            walInstanceBucketManager.close();
-        } catch (Exception e) {
-            log.error("Failed to close walInstanceBucketManager", e);
-        }
-
-        try {
+            long uploadDeadline = System.currentTimeMillis() + upLoadWaitTime;
+            for (BucketWriterWriter writer : writers) {
+                CacheBlockManager core = coreInstanceBucketManager.onlyGetBlockManager(writer.getBucketName());
+                writer.awaitRecovery(uploadDeadline);
+                core.updateAllBlock(uploadDeadline);
+            }
+            // 在途恢复和上传结束/取消后，才能做最终检查点并卸载 WAL。
+            for (BucketWriterWriter writer : writers) writer.close();
             coreInstanceBucketManager.close();
-        } catch (Exception e) {
-            log.error("Failed to close coreInstanceBucketManager", e);
+            for (BucketWriterWriter writer : writers) {
+                MappedFileManager wal = writer.getMappedManager();
+                wal.blockMetaDataManager.failUncommittedFutures();
+                wal.endFlushFileReadPosition();
+                wal.endMetaFlush();
+                wal.endChackMappedFile();
+                // 恢复失败时可能还有尚未注册到 manager 的旧文件，不能据空集合标记干净。
+                if (wal.mappedFileIsEmpty() && recoveryFailure == null) {
+                    BucketMetaInfoUtil.updateIsDirty(0, wal.getBucketMetaFileSegment());
+                }
+            }
+            walInstanceBucketManager.close();
+            try {
+                if (s3Client != null) s3Client.close();
+            } finally {
+                // 到这里存储任务和映射已退出，即使客户端 close 抛错也不能永久占住 WAL 目录。
+                // 此前等待写入/恢复/上传超时不会进入此分支，仍保留独占权供调用方重试。
+                try {
+                    directoryLock.close();
+                } finally {
+                    synchronized (lifecycleLock) {
+                        closed = true;
+                    }
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new CloudCacheException("Close interrupted; resources retained for retry", e);
+        } catch (TimeoutException e) {
+            throw new CloudCacheException("Recovery still running; resources retained for retry", e);
         }
-        //关闭S3client
-        if (s3Client != null) s3Client.close();
+    }
+
+    /** 锁文件永久保留，只释放 OS 锁；删除文件会让新旧进程锁住不同的文件对象。 */
+    private static final class InstanceDirectoryLock implements AutoCloseable {
+        private final FileChannel channel;
+        private final FileLock lock;
+
+        private InstanceDirectoryLock(FileChannel channel, FileLock lock) {
+            this.channel = channel;
+            this.lock = lock;
+        }
+
+        static InstanceDirectoryLock acquire(Path directory) {
+            FileChannel channel = null;
+            try {
+                Files.createDirectories(directory);
+                channel = FileChannel.open(directory.resolve(".instance.lock"),
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                FileLock lock = channel.tryLock();
+                if (lock == null) throw new CloudCacheException("WAL directory is already in use: " + directory);
+                return new InstanceDirectoryLock(channel, lock);
+            } catch (IOException | RuntimeException failure) {
+                if (channel != null) {
+                    try { channel.close(); } catch (IOException cleanup) { failure.addSuppressed(cleanup); }
+                }
+                throw new CloudCacheException("Cannot acquire exclusive WAL directory: " + directory, failure);
+            }
+        }
+
+        @Override
+        public void close() {
+            try {
+                try {
+                    if (lock.isValid()) lock.release();
+                } finally {
+                    channel.close();
+                }
+            } catch (IOException e) {
+                throw new CloudCacheException("Cannot release WAL directory lock", e);
+            }
+        }
     }
 
 

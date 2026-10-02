@@ -1,149 +1,143 @@
 package org.foreverfzl.cloudcache.wal.Util;
 
 import org.foreverfzl.cloudcache.wal.datastruct.BucketMetaInfo;
-import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.exception.WalException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
-import java.io.InputStream;
+import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.util.zip.CRC32;
+import java.util.Arrays;
+import java.util.stream.Stream;
 
-/**
- * bucket元数据文件工具类
- */
+/** Bucket 元数据读写；损坏与不存在必须区分，不能静默跳过需要恢复的 WAL。 */
 public class BucketMetaInfoUtil {
-    private static final Logger log = LoggerFactory.getLogger(LogName.BUCKET_META_INFO_UTIL);
-
-    // Bucket元数据文件名字
     private static final String META_FILE_NAME = "bucketMeta";
+    private static final int META_FILE_SIZE = 4096;
+    // 仍使用原来的 24 字节固定头，不占用前缀空间。最低位为 dirty，其余位标识 V2。
+    // 旧文件首 int 只有 0/1，仍按旧 CRC 算法读取；新文件不允许退回旧算法校验。
+    private static final int FORMAT_V2 = 0x424D0200;
 
-    // bucket元数据文件大小4KB
-    private static final int META_FILE_SIZE = 4 * 1024;
-
-
-    /**
-     * 由外部传入生命的外部 Arena，并将创建好的 MemorySegment 作为返回值返回
-     * dirPath指的是具体文件的上级目录
-     */
-    public static MemorySegment createAndMapBucketMetaFile(BucketMetaInfo bucketMetaInfo, Path dirPath, Arena externalArena) {
-        Path metaPath = dirPath.resolve(META_FILE_NAME);
+    /** 已有相同配置只重新映射，绝不截断；新建或无遗留 WAL 的配置变更才写 V2。 */
+    public static MemorySegment createAndMapBucketMetaFile(BucketMetaInfo metadata, Path directory, Arena arena) {
+        Path metaPath = directory.resolve(META_FILE_NAME);
         try {
-            if (metaPath.getParent() != null) {
-                Files.createDirectories(metaPath.getParent());
+            Files.createDirectories(directory);
+            BucketMetaInfo existing = readBucketMetaFile(directory);
+            boolean sameConfiguration = existing != null
+                    && existing.getBlockSize() == metadata.getBlockSize()
+                    && existing.getFileSize() == metadata.getFileSize()
+                    && Arrays.equals(existing.getData(), metadata.getData());
+            if (!sameConfiguration) {
+                if (hasWalFiles(directory)) {
+                    throw new WalException("Cannot change bucket metadata while WAL files remain: " + directory);
+                }
+                writeMetadataAtomically(metadata, directory);
             }
-            // FileChannel 在完成 mmap 后即可安全关闭，映射区域生命周期由 externalArena 绑定
-            try (FileChannel fileChannel = FileChannel.open(
-                    metaPath,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.READ,
-                    StandardOpenOption.WRITE,
-                    StandardOpenOption.TRUNCATE_EXISTING)) {
-
-                MemorySegment segment = fileChannel.map(
-                        FileChannel.MapMode.READ_WRITE,
-                        0,
-                        META_FILE_SIZE,
-                        externalArena
-                );
-                long pos = 0;
-                segment.set(ValueLayout.JAVA_INT, pos, bucketMetaInfo.getIsDirty());
-                pos += 4;
-                segment.set(ValueLayout.JAVA_INT, pos, bucketMetaInfo.getBlockSize());
-                pos += 4;
-                segment.set(ValueLayout.JAVA_LONG, pos, bucketMetaInfo.getFileSize());
-                pos += 8;
-                segment.set(ValueLayout.JAVA_INT, pos, bucketMetaInfo.getCrc());
-                pos += 4;
-                segment.set(ValueLayout.JAVA_INT, pos, bucketMetaInfo.getDataLen());
-                pos += 4;
-                MemorySegment.copy(
-                        bucketMetaInfo.getData(),
-                        0,
-                        segment,
-                        ValueLayout.JAVA_BYTE,
-                        pos,
-                        bucketMetaInfo.getDataLen()
-                );
-                segment.force();
+            try (FileChannel channel = FileChannel.open(metaPath, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                MemorySegment segment = channel.map(FileChannel.MapMode.READ_WRITE, 0, META_FILE_SIZE, arena);
+                // 映射旧文件时保持原版本与 CRC，只把 dirty 置为 1；不能先升级再恢复旧 WAL。
+                updateIsDirty(1, segment);
                 return segment;
             }
-        } catch (Exception e) {
-            throw new WalException("Create bucketMetaFile failed: " + metaPath, e);
+        } catch (IOException e) {
+            throw new WalException("Cannot create/map bucket metadata: " + metaPath, e);
         }
     }
 
-    public static BucketMetaInfo readBucketMetaFile(Path dirPath) {
-        int isDirty = 0;
-        int oldblockSize = 0;
-        long oldFileSize = 0;
-        byte[] data = null;
+    private static void writeMetadataAtomically(BucketMetaInfo metadata, Path directory) throws IOException {
+        byte[] prefix = metadata.getData();
+        ByteBuffer bytes = ByteBuffer.allocate(META_FILE_SIZE).order(ByteOrder.nativeOrder());
+        bytes.putInt(FORMAT_V2 | metadata.getIsDirty());
+        bytes.putInt(metadata.getBlockSize());
+        bytes.putLong(metadata.getFileSize());
+        bytes.putInt(metadata.getCrc());
+        bytes.putInt(prefix.length);
+        bytes.put(prefix);
+        bytes.position(0);
+        Path temporary = Files.createTempFile(directory, ".bucketMeta-", ".tmp");
         try {
-            Path bucketMetaPath = dirPath.resolve(META_FILE_NAME);
-            if (!Files.exists(bucketMetaPath) || !Files.isRegularFile(bucketMetaPath)) {
-                return null;
+            // 完整写入并强制落盘临时文件后才替换原件。原子替换不受支持时直接失败，不截断原件。
+            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE)) {
+                while (bytes.hasRemaining()) channel.write(bytes);
+                channel.force(true);
             }
-            // 仅读取文件前 4KB (4096 字节)
-            byte[] metaBytes;
-            try (InputStream in = Files.newInputStream(bucketMetaPath)) {
-                metaBytes = in.readNBytes(META_FILE_SIZE);
-            }
-
-            MemorySegment segment = MemorySegment.ofArray(metaBytes);
-            long pos = 0;
-
-            // 1. 读取 isDirty (使用 JAVA_INT_UNALIGNED)
-            isDirty = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
-            pos += 4;
-
-            // 2. 读取 blockSize (使用 JAVA_INT_UNALIGNED)
-            oldblockSize = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
-            pos += 4;
-
-            // 3. 读取 fileSize (使用 JAVA_LONG_UNALIGNED)
-            oldFileSize = segment.get(ValueLayout.JAVA_LONG_UNALIGNED, pos);
-            pos += 8;
-
-            // 4. 读取 CRC (使用 JAVA_INT_UNALIGNED)
-            int oldCrc = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
-            pos += 4;
-
-            // 5. 读取 dataLen (使用 JAVA_INT_UNALIGNED)
-            int dataLen = segment.get(ValueLayout.JAVA_INT_UNALIGNED, pos);
-            pos += 4;
-
-            // 6. 读取 data (byte[])
-            data = new byte[dataLen];
-            MemorySegment.copy(segment, ValueLayout.JAVA_BYTE, pos, data, 0, dataLen);
-            // 校验数据 CRC
-            CRC32 crc32 = new CRC32();
-            crc32.update(oldblockSize);
-            crc32.update(Math.toIntExact(oldFileSize));
-            crc32.update(dataLen);
-            crc32.update(data);
-            // bucketMeta 文件损坏，以前的文件无法恢复
-            if ((int) crc32.getValue() != oldCrc) {
-                log.warn("An error occurred in the bucketMeta data.old file can not recover. file path is {}", bucketMetaPath);
-                return null;
-            }
-        } catch (Exception e) {
-            log.error("readBucketMetaFile failed, path is {} ", dirPath, e);
-            return null;
+            Files.move(temporary, directory.resolve(META_FILE_NAME),
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
         }
-        return new BucketMetaInfo(isDirty, oldblockSize, oldFileSize, data);
     }
 
-    //修改bucketMetaInfo的isDirty
-    public static void updateIsDirty(int isDirty, MemorySegment memorySegment) {
-        memorySegment.set(ValueLayout.JAVA_INT, 0, isDirty);
-        memorySegment.force();
+    /** 仅在元数据确实不存在且没有 WAL 时返回 null；任何损坏都拒绝继续恢复/覆盖。 */
+    public static BucketMetaInfo readBucketMetaFile(Path directory) {
+        Path metaPath = directory.resolve(META_FILE_NAME);
+        try {
+            if (!Files.exists(metaPath)) {
+                if (hasWalFiles(directory)) throw new WalException("WAL exists without bucket metadata: " + directory);
+                return null;
+            }
+            if (!Files.isRegularFile(metaPath) || Files.size(metaPath) != META_FILE_SIZE) {
+                throw new WalException("Invalid bucket metadata file size: " + metaPath);
+            }
+            byte[] bytes = Files.readAllBytes(metaPath);
+            if (bytes.length != META_FILE_SIZE) throw new WalException("Truncated bucket metadata: " + metaPath);
+            ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+            int flags = buffer.getInt();
+            boolean legacy = flags == 0 || flags == 1;
+            if (!legacy && (flags & ~1) != FORMAT_V2) {
+                throw new WalException("Unknown bucket metadata version: " + metaPath);
+            }
+            int blockSize = buffer.getInt();
+            long fileSize = buffer.getLong();
+            int storedCrc = buffer.getInt();
+            int prefixLength = buffer.getInt();
+            if (prefixLength < 0 || prefixLength > BucketMetaInfo.MAX_PREFIX_BYTES) {
+                throw new WalException("Invalid bucket metadata prefix length: " + metaPath);
+            }
+            byte[] prefix = new byte[prefixLength];
+            buffer.get(prefix);
+            BucketMetaInfo metadata;
+            try {
+                metadata = new BucketMetaInfo(flags & 1, blockSize, fileSize, prefix);
+            } catch (IllegalArgumentException e) {
+                throw new WalException("Invalid bucket metadata fields: " + metaPath, e);
+            }
+            int expectedCrc = legacy ? metadata.legacyCrc() : metadata.getCrc();
+            if (storedCrc != expectedCrc) throw new WalException("Bucket metadata CRC mismatch: " + metaPath);
+            return metadata;
+        } catch (IOException e) {
+            throw new WalException("Cannot read bucket metadata: " + metaPath, e);
+        }
     }
 
+    private static boolean hasWalFiles(Path directory) throws IOException {
+        Path walDirectory = directory.resolve("wal");
+        if (!Files.exists(walDirectory)) return false;
+        if (!Files.isDirectory(walDirectory)) throw new WalException("WAL path is not a directory: " + walDirectory);
+        try (Stream<Path> paths = Files.list(walDirectory)) {
+            return paths.anyMatch(Files::isRegularFile);
+        }
+    }
+
+    /** dirty 是可变标记，不参与配置 CRC；修改时必须保留 V2 标记，防止误按旧 CRC 解释。 */
+    public static void updateIsDirty(int isDirty, MemorySegment segment) {
+        if (isDirty != 0 && isDirty != 1) throw new IllegalArgumentException("isDirty must be 0 or 1");
+        int flags = segment.get(ValueLayout.JAVA_INT, 0);
+        if (flags == 0 || flags == 1) {
+            segment.set(ValueLayout.JAVA_INT, 0, isDirty);
+        } else if ((flags & ~1) == FORMAT_V2) {
+            segment.set(ValueLayout.JAVA_INT, 0, FORMAT_V2 | isDirty);
+        } else {
+            throw new WalException("Cannot update unknown bucket metadata version");
+        }
+        segment.force();
+    }
 }

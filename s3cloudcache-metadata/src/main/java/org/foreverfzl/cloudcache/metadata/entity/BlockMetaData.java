@@ -5,6 +5,9 @@ import org.foreverfzl.cloudchache.common.FutureContext;
 import org.foreverfzl.cloudchache.common.WriteResult;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 public class BlockMetaData {
@@ -38,6 +41,9 @@ public class BlockMetaData {
     private volatile int finishedBytes;
     private static final AtomicIntegerFieldUpdater<BlockMetaData> FINISHED_BYTES_UPDATER;
     private volatile long lastActiveTime;
+    // 原请求走完 WAL -> Core 后才计入，包含物理写入失败；恢复不能越过尚未到达 Core 的请求。
+    private int completedAppendsBytes;
+    private volatile boolean recovering;
 
     //该isBroken指的是物理block
     protected static final AtomicIntegerFieldUpdater<BlockMetaData> IS_BROKEN_UPDATER;
@@ -64,13 +70,13 @@ public class BlockMetaData {
 
 
     //尝试将Block设置为封口
-    public boolean trySeal() {
+    public synchronized boolean trySeal() {
         return STATE_UPDATER.compareAndSet(this, OPEN, SEALED);
     }
 
     //尝试将Block设置为上传
-    public boolean tryStartUpload() {
-        return STATE_UPDATER.compareAndSet(this, SEALED, UPLOADING);
+    public synchronized boolean tryStartUpload() {
+        return canUpload() && STATE_UPDATER.compareAndSet(this, SEALED, UPLOADING);
     }
 
     //尝试将Block设置上传成功
@@ -79,8 +85,10 @@ public class BlockMetaData {
     }
 
     //尝试将Block设置为上传失败
-    public boolean markUploadFailed() {
-        return STATE_UPDATER.compareAndSet(this, UPLOADING, FAILED);
+    public synchronized boolean markUploadFailed() {
+        if (state == SUCCESS || state == FAILED) return false;
+        STATE_UPDATER.set(this, FAILED);
+        return true;
     }
 
 
@@ -121,7 +129,23 @@ public class BlockMetaData {
         this.finishedBytes = 0;
     }
 
-    public void addFuture(FutureContext future) {
+    public synchronized void addCompletedAppendsBytes(int bytes) {
+        completedAppendsBytes += bytes;
+    }
+
+    public synchronized int getCompletedAppendsBytes() {
+        return completedAppendsBytes;
+    }
+
+    public boolean isRecovering() {
+        return recovering;
+    }
+
+    public void setRecovering(boolean recovering) {
+        this.recovering = recovering;
+    }
+
+    public synchronized void addFuture(FutureContext future) {
         futureMap.put(future.getWalRecordId(), future);
     }
 
@@ -130,19 +154,40 @@ public class BlockMetaData {
     }
 
     public void completeAllFuture() {
-        for (FutureContext value : futureMap.values()) {
-            value.getFuture().complete(new WriteResult(value.getS3Key(), value.getPhysicalOffset(), value.getSize(), true));
-        }
-        futureMap.clear();
+        notifyFutures(true);
     }
 
 
     public void failAllFuture(){
-        for (FutureContext value : futureMap.values()) {
-            value.getFuture().complete(new WriteResult(value.getS3Key(), value.getPhysicalOffset(), value.getSize(), false));
+        notifyFutures(false);
+    }
+
+    private void notifyFutures(boolean success) {
+        for (FutureNotification notification : drainNotifications(success)) {
+            // complete 会同步执行用户的 thenAccept/whenComplete：用户可能关闭实例，
+            // 也可能等待同一 Block 的另一条 Future，不能阻塞上传线程或串行通知循环。
+            // 每条通知独立使用虚拟线程，且不属于上传执行器，避免 close 等待调用它的线程自身。
+            Thread.ofVirtual().name("cloudcache-future-notify").start(() ->
+                    notification.future().complete(notification.result()));
+        }
+    }
+
+    private synchronized List<FutureNotification> drainNotifications(boolean success) {
+        if (success && state != SUCCESS) {
+            throw new IllegalStateException("Block futures cannot succeed before S3 commit");
+        }
+        List<FutureNotification> notifications = new ArrayList<>(futureMap.size());
+        for (FutureContext context : futureMap.values()) {
+            // 在锁内复制最终结果；通知线程只持有普通堆内对象，不再读取可复用的 Block、
+            // WAL 或堆外内存，因此实例释放这些资源不会影响稍后运行的通知与用户回调。
+            notifications.add(new FutureNotification(context.getFuture(), new WriteResult(
+                    context.getS3Key(), context.getPhysicalOffset(), context.getSize(), success)));
         }
         futureMap.clear();
+        return notifications;
     }
+
+    private record FutureNotification(CompletableFuture<WriteResult> future, WriteResult result) { }
 
     public ConcurrentHashMap<Long, FutureContext> getFutureMap() {
         return futureMap;
@@ -182,9 +227,8 @@ public class BlockMetaData {
     }
 
     //将1位设置为1
-    public void setBrokenSubmit() {
-        int pre = IS_BROKEN_UPDATER.get(this);
-        IS_BROKEN_UPDATER.compareAndSet(this, pre, pre | (1 << 1));
+    public synchronized void setBrokenSubmit() {
+        IS_BROKEN_UPDATER.set(this, isBroken | (1 << 1));
     }
 
     public boolean isBroken() {
@@ -195,16 +239,16 @@ public class BlockMetaData {
         return (IS_BROKEN_UPDATER.get(this) & (1 << 1)) == (1 << 1);
     }
 
-    public void setUnBroken() {
-        int pre = IS_BROKEN_UPDATER.get(this);
-        IS_BROKEN_UPDATER.compareAndSet(this, pre, 0);
+    public synchronized void setUnBroken() {
+        IS_BROKEN_UPDATER.set(this, 0);
     }
 
     public int getIsBroken() {
         return IS_BROKEN_UPDATER.get(this);
     }
 
-    public boolean canUpload() {
-        return state == 1 && expectedBytes == pageCacheBytes && pageCacheBytes == finishedBytes;
+    public synchronized boolean canUpload() {
+        return state == SEALED && !isBroken() && !recovering
+                && expectedBytes > 0 && expectedBytes == pageCacheBytes && pageCacheBytes == finishedBytes;
     }
 }

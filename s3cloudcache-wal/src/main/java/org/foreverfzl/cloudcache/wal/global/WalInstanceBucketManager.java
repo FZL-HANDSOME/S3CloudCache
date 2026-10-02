@@ -7,6 +7,7 @@ import org.foreverfzl.cloudcache.wal.storefile.DefaultMappedFile;
 import org.foreverfzl.cloudchache.common.LogName;
 import org.foreverfzl.cloudchache.common.ProjectUtil;
 import org.foreverfzl.cloudchache.common.config.S3CloudCacheConfig;
+import org.foreverfzl.cloudchache.common.exception.WalException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,7 +37,7 @@ public class WalInstanceBucketManager {
     private final ReentrantLock[] locks;
     //检查每个Bucket的最后一个Block的空闲时间的，如果超出配置的最大空闲时间则封口
     private final long blockMaxIdleTime;
-    private static final ScheduledExecutorService checkBlockMetaExecutor = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService checkBlockMetaExecutor = Executors.newSingleThreadScheduledExecutor();
 
 
     public WalInstanceBucketManager(String instanceName, S3CloudCacheConfig config) {
@@ -139,11 +140,23 @@ public class WalInstanceBucketManager {
     }
 
     public void close() {
-        //关闭定时线程池
-        checkBlockMetaExecutor.shutdownNow();
+        stopScheduler();
         //关闭自己维护的bucketManager
         managerHashMap.forEach((bucketName, fileManager) -> {
             fileManager.close();
         });
+    }
+
+    /** 停止空闲封口任务，但保留所有文件映射供关闭刷盘和恢复使用。 */
+    public void stopScheduler() {
+        checkBlockMetaExecutor.shutdownNow();
+        try {
+            if (!checkBlockMetaExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                throw new WalException("Idle-block scheduler did not stop for " + instanceName);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new WalException("Interrupted while stopping idle-block scheduler for " + instanceName, e);
+        }
     }
 }

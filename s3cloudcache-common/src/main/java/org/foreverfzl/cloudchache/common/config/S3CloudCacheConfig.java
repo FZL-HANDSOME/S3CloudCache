@@ -2,6 +2,7 @@ package org.foreverfzl.cloudchache.common.config;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.nio.file.Path;
 
 /**
  * 该类存储真个项目的配置
@@ -63,6 +64,53 @@ public class S3CloudCacheConfig {
         this.walPath = walPath;
         this.defaultBucketConfig = defaultBucketConfig;
         this.specialBuckets = specialBuckets;
+    }
+
+    /**
+     * 在实例启动前校验配置并深拷贝每个 Bucket，避免调用方修改配置后导致现存 Block 与新 WAL 尺寸不一致。
+     * 本方法只检查配置，不创建目录、线程或内存映射；配置修改应通过关闭后重新创建实例生效。
+     */
+    public S3CloudCacheConfig snapshotAndValidate() {
+        String name = this.instanceName;
+        String directory = this.walPath;
+        Integer maxIdleTime = this.blockMaxIdleTime;
+        validatePathComponent(name, "instanceName");
+        if (directory != null) {
+            if (directory.isBlank()) throw new IllegalArgumentException("walPath must not be blank");
+            Path.of(directory); // 提前拒绝本平台无法表示的路径，但不要求目录已经存在。
+        }
+        if (maxIdleTime == null || maxIdleTime <= 0) {
+            throw new IllegalArgumentException("blockMaxIdleTime must be positive");
+        }
+        if (defaultBucketConfig == null) throw new IllegalArgumentException("defaultBucketConfig must not be null");
+        if (specialBuckets == null) throw new IllegalArgumentException("specialBuckets must not be null");
+        BucketConfig defaultCopy = defaultBucketConfig.copyAndValidate();
+        Map<String, BucketConfig> bucketCopies = new HashMap<>();
+        // 特殊 Bucket 仍是完整配置，不在此隐式改变现有配置覆盖规则。
+        for (Map.Entry<String, BucketConfig> entry : specialBuckets.entrySet()) {
+            validatePathComponent(entry.getKey(), "special bucket name");
+            if (entry.getValue() == null) throw new IllegalArgumentException("special bucket config must not be null");
+            bucketCopies.put(entry.getKey(), entry.getValue().copyAndValidate());
+        }
+        S3CloudCacheConfig snapshot = new S3CloudCacheConfig(name, directory, defaultCopy, bucketCopies);
+        snapshot.blockMaxIdleTime = maxIdleTime;
+        return snapshot;
+    }
+
+    /**
+     * 实例名和 Bucket 名都是 WAL 根目录下的单个目录分量，不能携带路径跳转或 Windows 驱动器标记。
+     * 不施加完整 S3 命名规则，保留中文、下划线等原有可用名字。
+     */
+    public static void validatePathComponent(String value, String name) {
+        if (value == null || value.isBlank() || value.equals(".") || value.equals("..")
+                || value.indexOf('/') >= 0 || value.indexOf('\\') >= 0
+                || value.indexOf(':') >= 0 || value.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(name + " must be a single nonempty path component");
+        }
+        Path path = Path.of(value);
+        if (path.isAbsolute() || path.getNameCount() != 1) {
+            throw new IllegalArgumentException(name + " must be a single relative path component");
+        }
     }
 
     public S3CloudCacheConfig setInstanceName(String instanceName) {
