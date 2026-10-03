@@ -3,14 +3,20 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- 中文：继承 1.0-SNAPSHOT 父工程；WAL 层独立于 AWS SDK 和上传实现。
+         English: Inherits the 1.0-SNAPSHOT parent; the WAL layer remains independent of the AWS SDK and uploader implementation. -->
     <parent>
         <groupId>org.example</groupId>
         <artifactId>S3CloudCache</artifactId>
         <version>1.0-SNAPSHOT</version>
     </parent>
 
+    <!-- 中文：提供映射文件、记录协议、持久元数据和文件生命周期管理。
+         English: Provides mapped files, record protocol, durable metadata, and file-lifecycle management. -->
     <artifactId>s3cloudcache-wal</artifactId>
 
+    <!-- 中文：使用 Java 25 源码和字节码目标，源码编码 UTF-8；映射文件实现使用外部内存 API。
+         English: Uses Java 25 source and bytecode targets with UTF-8 encoding; mapped-file implementations use the foreign-memory API. -->
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
@@ -18,17 +24,23 @@
     </properties>
 
     <dependencies>
+        <!-- 中文：JUnit 4.13.2 只用于临时目录中的离线 WAL/元数据回归，不进入生产传递依赖。
+             English: JUnit 4.13.2 is test-only for offline WAL/metadata regressions in temporary directories, not a production transitive dependency. -->
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
             <version>4.13.2</version>
             <scope>test</scope>
         </dependency>
+        <!-- 中文：common 以默认 compile 范围提供容量配置、平台操作和异常定义，版本与 reactor 保持一致。
+             English: common supplies capacity settings, platform operations, and exceptions with default compile scope at the reactor version. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-common</artifactId>
             <version>1.0-SNAPSHOT</version>
         </dependency>
+        <!-- 中文：metadata 提供跨 WAL 与物理缓存共享的逻辑块状态，默认 compile 范围，不引入对 core 的反向依赖。
+             English: metadata supplies logical Block state shared with the physical cache at default compile scope, without a reverse dependency on core. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-metadata</artifactId>

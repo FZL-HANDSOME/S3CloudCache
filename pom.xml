@@ -4,6 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
+    <!-- 中文：聚合和父 POM 使用 1.0-SNAPSHOT 坐标，统一五个模块的构建属性与继承依赖；本项目节点不生成业务 jar。
+         English: The 1.0-SNAPSHOT aggregator/parent shares build properties and inherited dependencies across five modules; this project does not produce an application jar. -->
     <groupId>org.example</groupId>
     <artifactId>S3CloudCache</artifactId>
     <version>1.0-SNAPSHOT</version>
@@ -18,6 +20,8 @@
 └──
 
     -->
+    <!-- 中文：reactor 依照实际依赖排序构建；common 提供公共类型，metadata 共享状态，wal 负责持久化，core 管理堆外块，storage 提供 S3 接口。
+         English: The reactor builds in dependency order: common provides API types, metadata shares state, wal persists data, core manages native blocks, and storage exposes S3 integration. -->
     <modules>
         <module>s3cloudcache-wal</module>
         <module>s3cloudcache-common</module>
@@ -26,6 +30,8 @@
         <module>s3cloudcache-metadata</module>
     </modules>
 
+    <!-- 中文：源码等级和目标字节码均为 Java 25，编译器必须支持该目标；源码按 UTF-8 解码，保留中英文注释与文本。
+         English: Source level and target bytecode are Java 25, requiring a compiler that supports this target; UTF-8 preserves bilingual source comments and text. -->
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
@@ -33,11 +39,15 @@
     </properties>
 
     <dependencies>
+        <!-- 中文：SLF4J 2.0.9 是默认 compile 范围的日志接口依赖，由子模块继承，不负责选择日志实现。
+             English: SLF4J 2.0.9 is an inherited, default-compile-scope logging API dependency; it does not select a logging implementation. -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>2.0.9</version>
         </dependency>
+        <!-- 中文：Logback 1.4.8 为 provided 范围，构建期可用但不作为消费者的传递运行时绑定；应用自行提供兼容日志实现。
+             English: Logback 1.4.8 has provided scope: available during builds, but not a transitive runtime binding for consumers; applications supply a compatible implementation. -->
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>

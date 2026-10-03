@@ -3,14 +3,20 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- 中文：继承项目的 1.0-SNAPSHOT 版本、编译约定及日志接口依赖；本模块不依赖其它 CloudCache 子模块。
+         English: Inherits the project's 1.0-SNAPSHOT version, compilation settings, and logging dependencies; this module depends on no other CloudCache module. -->
     <parent>
         <groupId>org.example</groupId>
         <artifactId>S3CloudCache</artifactId>
         <version>1.0-SNAPSHOT</version>
     </parent>
 
+    <!-- 中文：公共 jar 暴露配置、结果、异常、枚举及平台工具，作为其它模块和使用方共享的类型边界。
+         English: This public jar supplies shared configurations, results, exceptions, enums, and platform utilities for modules and consumers. -->
     <artifactId>s3cloudcache-common</artifactId>
 
+    <!-- 中文：显式保持 Java 25 源码/目标字节码和 UTF-8；本模块的平台工具使用外部内存与链接 API。
+         English: Explicitly retains Java 25 source/target bytecode and UTF-8; platform utilities use the foreign-memory and linker APIs. -->
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>

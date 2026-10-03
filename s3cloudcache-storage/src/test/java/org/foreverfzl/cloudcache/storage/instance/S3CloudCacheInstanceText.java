@@ -53,26 +53,49 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
+/**
+ * 中文：包含真实 MinIO 手动用例和 offline* 离线故障回归；main 会发真实请求并产生 WAL/对象，JUnit 只调用离线入口。
+ * English: Contains real-MinIO manual cases and offline* fault regressions; main performs real I/O and creates WAL/objects, while JUnit invokes offline entry points.
+ * 中文：完整性检查记录身份、字节和返回位置，不要求未提交并发记录按调用顺序排列；压测结果不是生产吞吐 SLA。
+ * English: Integrity checks record identities, bytes and returned locations, not invocation-order layouts for uncommitted records; load results are not production SLAs.
+ */
 public class S3CloudCacheInstanceText {
 
+    /** 中文：阶段/失败诊断，日志不能替代断言；English: stage/failure diagnostics, not a replacement for assertions. */
     private static final Logger log = LoggerFactory.getLogger("Text");
 
     // ===== 测试公共配置（与 MinIO 环境保持一致）=====
+    // English: Real-service manual settings; offline scenarios never use this endpoint or credentials.
+    /** 中文：需提前启动的本地服务地址；English: local service endpoint to provision before running. */
     private static final String ENDPOINT = "http://127.0.0.1:9001";
+    /** 中文：客户端签名区域；English: client signing region. */
     private static final String REGION = "cn-local";
+    /** 中文：本地示例访问标识，勿在源码中替换为生产凭证；English: local demo identifier; never replace with production credentials in source. */
     private static final String ACCESS_KEY = "123456789";
+    /** 中文：本地示例密钥，部署凭证应外置管理；English: local demo secret; manage deployment credentials externally. */
     private static final String SECRET_KEY = "123456789";
+    /** 中文：必须预先存在的远端 Bucket；English: remote bucket that must already exist. */
     private static final String BUCKET_NAME = "textbucket";
+    /** 中文：手动对象前缀，重复测试需注意存量对象命名空间；English: manual object prefix; account for existing namespaces on reruns. */
     private static final String S3_KEY_PREFIX = "oreder/phone";
 
     /**
      * 测试失败统一出口：打印错误并抛出 AssertionError，让测试真正"失败"，而不是只打日志后假装通过。
+     * English: Logs and throws AssertionError so a diagnostic is not mistaken for a passing test.
+     * @param message 中文：场景失败描述；English: scenario failure description.
+     * @throws AssertionError 中文：总是失败退出；English: always thrown to fail the test.
      */
     private static void fail(String message) {
         log.error(message);
         throw new AssertionError(message);
     }
 
+    /**
+     * 中文：手动执行下面选中的真实服务用例，不会自动执行 offline 回归；运行前确认目录与远端对象可以用于测试。
+     * English: Manually runs the selected real-service case, not offline regressions; verify local/remote test targets before running.
+     * @param args 中文：未使用；English: unused.
+     * @throws Exception 中文：网络、文件或等待失败；English: network, file or wait failure.
+     */
     public static void main(String[] args) throws Exception {
 //        text();
 //        //高并发测试
@@ -87,6 +110,10 @@ public class S3CloudCacheInstanceText {
 
 
     //测试WAL持久化是否正常工作
+    /**
+     * 中文：历史交互示例，等待控制台输入并打印真实上传结果；不含完整性断言，回调错误处理也不宜直接用于生产。
+     * English: Legacy interactive demo waiting for console input and logging real uploads; lacks integrity assertions and production-grade callback error handling.
+     */
     private static void text() {
         //创建S3Client(String endpoint, String region, String accessKey, String secretKey)
         S3Client s3Client = S3ClientFactory.createS3Client("http://127.0.0.1:9001", "cn-local", "123456789", "123456789");
@@ -132,6 +159,11 @@ public class S3CloudCacheInstanceText {
     // 写入：8 线程 × 1000 条 × 4KB ≈ 32MB，跨越 2 个 WAL 文件（必然触发文件切换）
     // 校验：写阶段零失败 + 数量精确；回读阶段逐字节比对（Range GET），一字不差才算通过
     // ========================================================================
+    /**
+     * 中文：真实 8×1000 条 4KiB 写入触发文件轮转，检查成功数量与 Range GET 字节。
+     * English: Real 8x1000 writes of 4 KiB force rotation; verifies success counts and Range GET bytes.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void Medium_concurrency_large_data_volume_test() throws Exception {
         S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
         BucketConfig defaultBucketConfig = new BucketConfig();
@@ -336,6 +368,11 @@ public class S3CloudCacheInstanceText {
 
     /**
      * 构造一条确定性、可定位的固定长度记录，确保每条数据唯一且可回读逐字节比对。
+     * English: Deterministic fixed-length bytes identify their producer/sequence for exact readback comparison.
+     * @param threadId 中文：生产者编号；English: producer identifier.
+     * @param seq 中文：生产者内序号；English: sequence within that producer.
+     * @param recordSize 中文：数组字节数，用例传入 4096；English: array byte length, 4096 in this case.
+     * @return 中文：新建独立数组；English: new independent array.
      */
     private static byte[] buildMediumRecord(int threadId, int seq, int recordSize) {
         byte[] record = new byte[recordSize];
@@ -364,6 +401,11 @@ public class S3CloudCacheInstanceText {
     //   2. 写入失败数为 0，且成功数 == total；
     //   3. 回读校验阶段必须全部完成，FAIL 数为 0，且 PASS 数 == total。
     // ========================================================================
+    /**
+     * 中文：真实 160000 条并发写入，在 close 前检查 Future 完成，避免关闭兜底掩盖自动封口故障。
+     * English: Real 160000 concurrent writes check future completion before close, avoiding shutdown masking automatic-sealing failures.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void highConcurrencyTest() throws Exception {
         S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
         BucketConfig defaultBucketConfig = new BucketConfig();
@@ -596,6 +638,11 @@ public class S3CloudCacheInstanceText {
     //   2. 写入失败数为 0，且收集到的结果数 == writeCount；
     //   3. 回读阶段 PASS 数 == writeCount 且 FAIL 数为 0。
     // ========================================================================
+    /**
+     * 中文：真实串行提交 1000 条变长记录，异步上传后按各条成功位置逐字节回读。
+     * English: Serially submits 1000 variable-length records to real storage and verifies every successful range byte by byte.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void dataIntegrityTest() throws Exception {
         S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
         BucketConfig defaultBucketConfig = new BucketConfig();
@@ -769,6 +816,11 @@ public class S3CloudCacheInstanceText {
     //   2. writeOffHeapData(ByteBuffer, offset, length) —— 写 buffer 的 [position+offset, position+offset+length)
     // 判定规则：与 dataIntegrityTest 一致（超时/数量/字节比对任一不满足即抛 AssertionError）。
     // ========================================================================
+    /**
+     * 中文：真实服务各写 500 条完整/切片 direct buffer，验证位置、长度与字节一致。
+     * English: Writes 500 whole-buffer and 500 direct-buffer range records to real storage, verifying locations, sizes and bytes.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offHeapDataIntegrityTest() throws Exception {
         S3Client instanceClient = S3ClientFactory.createS3Client(ENDPOINT, REGION, ACCESS_KEY, SECRET_KEY);
         BucketConfig defaultBucketConfig = new BucketConfig();
@@ -953,9 +1005,18 @@ public class S3CloudCacheInstanceText {
     }
 
     // 以下回归只使用临时 WAL 和内存 S3Client，不修改上面真实 MinIO 测试的 main 入口。
+    // 中文：离线方法由 JUnit 包装类调用，与 main 当前选中的真实用例无关。
+    // English: JUnit wrappers invoke offline methods independently of whichever real-service case main selects.
+    /** 中文：2 MiB 逻辑块，WAL 还需容纳每条协议头；English: 2 MiB logical block; WAL capacity also includes each record header. */
     private static final int REGRESSION_BLOCK_SIZE = 2 * 1024 * 1024;
+    /** 中文：内存模拟端专用 Bucket 名；English: bucket name reserved for the in-memory endpoint. */
     private static final String REGRESSION_BUCKET = "offline-regression";
 
+    /**
+     * 中文：阻塞 PUT 返回证明 Future 不提前成功；finally 释放闸门以免失败后泄漏线程。
+     * English: Gates PUT return to prove futures do not succeed early; finally releases the gate to avoid leaking workers.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineFutureConfirmationTest() throws Exception {
         MemoryS3 remote = new MemoryS3();
         remote.blockUploads.set(true);
@@ -972,6 +1033,11 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：注入 503，验证重试及失败尾块 WAL 保留，再重开同目录完整恢复。
+     * English: Injects 503 to verify retries and failed-tail WAL retention, then restarts the same directory for complete recovery.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineFailedUploadRecoveryTest() throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-failure-");
         MemoryS3 failedRemote = new MemoryS3();
@@ -985,6 +1051,7 @@ public class S3CloudCacheInstanceText {
                 futures.add(fixture.writer.writeHeapData(record));
             }
             // A partial tail must remain recoverable even when shutdown itself starts the failing upload.
+            // 中文：部分尾块即使由关闭触发失败上传，也必须保留重启所需的 WAL。
             fixture.close();
             for (CompletableFuture<WriteResult> future : futures) {
                 try {
@@ -992,6 +1059,7 @@ public class S3CloudCacheInstanceText {
                     checkRegression(!result.isSuccess(), "failed S3 upload returned a successful Future");
                 } catch (ExecutionException expectedFailure) {
                     // Exceptional completion is also an explicit failure, never a false success.
+                    // 中文：异常完成也是明确失败，不能把它算成上传成功。
                 }
             }
             checkRegression(failedRemote.attempts.get() >= 3, "transient upload exception was not retried");
@@ -1009,11 +1077,18 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：8×96 条混合长度轮流覆盖四种 API，两块物理池强制回收并跨多个 WAL。
+     * English: 8x96 mixed-length records exercise four APIs; a two-block pool forces reuse across multiple WAL files.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineConcurrentIntegrityTest() throws Exception {
         MemoryS3 remote = new MemoryS3();
         try (RegressionFixture fixture = new RegressionFixture("concurrent", remote)) {
             ExecutorService executor = Executors.newFixedThreadPool(8);
             ConcurrentLinkedQueue<PendingRegressionRecord> pending = new ConcurrentLinkedQueue<>();
+            // 中文：只在生产者中并发收集；等待全部生产者完成后才做顺序校验，避免对未完成集合断言。
+            // English: Producers collect concurrently; assertions run only after all producer tasks finish.
             List<Future<?>> producers = new ArrayList<>();
             CountDownLatch start = new CountDownLatch(1);
             try {
@@ -1026,6 +1101,8 @@ public class S3CloudCacheInstanceText {
                             byte[] record = regressionRecord(id, 16384 + id % 97);
                             CompletableFuture<WriteResult> future;
                             switch (id % 4) {
+                                // 中文：非零数组偏移及非零 position/相对 offset 专门检测切片坐标系错误。
+                                // English: Nonzero array offsets and buffer position/relative offsets detect mixed coordinate systems.
                                 case 0 -> future = fixture.writer.writeHeapData(record);
                                 case 1 -> {
                                     byte[] container = new byte[record.length + 11];
@@ -1072,6 +1149,11 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：16 线程首次查找同 Bucket，比较对象身份而非只看名字。
+     * English: Sixteen threads first-access one bucket and compare object identity rather than names.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineWriterSingletonTest() throws Exception {
         try (RegressionFixture fixture = new RegressionFixture("writers", new MemoryS3())) {
             ExecutorService executor = Executors.newFixedThreadPool(16);
@@ -1096,11 +1178,17 @@ public class S3CloudCacheInstanceText {
                 executor.shutdownNow();
                 executor.awaitTermination(5, TimeUnit.SECONDS);
                 // Also stop orphan recovery threads if the singleton assertion exposes a regression.
+                // 中文：若单例断言失败，也关闭意外重复的恢复线程，避免测试失败后进程无法退出。
                 observed.forEach(BucketWriterWriter::close);
             }
         }
     }
 
+    /**
+     * 中文：关闭实例一后继续使用实例二并创建实例三，检测静态执行器误共享。
+     * English: Uses a second instance and creates a third after closing the first to detect incorrect shared-static executors.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineInstanceIsolationTest() throws Exception {
         MemoryS3 secondRemote = new MemoryS3();
         try (RegressionFixture first = new RegressionFixture("first-instance", new MemoryS3());
@@ -1111,12 +1199,18 @@ public class S3CloudCacheInstanceText {
             sealRegressionTail(second.writer);
             verifyRegressionResult(secondRemote, record, future.get(15, TimeUnit.SECONDS));
             // Construction after another instance closes must also work in the same JVM.
+            // 中文：同 JVM 内关闭后再创建，能捕获静态线程池永久关闭后被再次使用的问题。
             try (RegressionFixture third = new RegressionFixture("third-instance", new MemoryS3())) {
                 checkRegression(third.writer != null, "new instance failed after another instance closed");
             }
         }
     }
 
+    /**
+     * 中文：同目录和远端状态重开，验证旧位置仍有效且新对象不复用旧 Key。
+     * English: Restarts the same directory/remote state, requiring old locations to remain valid and new keys to differ.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineRestartKeyUniquenessTest() throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-restart-");
         MemoryS3 remote = new MemoryS3();
@@ -1140,6 +1234,11 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：前块失败后块成功，重启检查成功块上传次数不增加且完整恢复缺口。
+     * English: With an earlier failed block and later confirmed block, restart must fill the gap without reuploading the confirmed object.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineNonContiguousConfirmationTest() throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-upload-gap-");
         MemoryS3 remote = new MemoryS3();
@@ -1157,6 +1256,7 @@ public class S3CloudCacheInstanceText {
                 checkRegression(!failed.get(20, TimeUnit.SECONDS).isSuccess(), "gap block reported false success");
             } catch (ExecutionException expectedFailure) {
                 // The first block failed, but the following block is already acknowledged to its caller.
+                // 中文：前块失败不撤销后块已经交付给调用方的确认位置。
             }
         }
         String confirmedObject = REGRESSION_BUCKET + "/" + confirmed.getS3Key();
@@ -1165,6 +1265,7 @@ public class S3CloudCacheInstanceText {
         try (RegressionFixture fixture = new RegressionFixture(directory, "upload-gap", remote)) {
             awaitRegressionBytes(remote, (long) failedRecord.length + confirmedRecord.length, 20000);
             // Wait for recovery/upload termination before asserting absence of a late duplicate upload.
+            // 中文：等待恢复/上传退出后再断言次数，避免漏掉迟到的重复 PUT。
             fixture.close();
             checkRegression(remote.acceptedUploads.get(confirmedObject).get() == previousUploads,
                     "restart reuploaded an acknowledged block beyond a failed upload gap");
@@ -1173,10 +1274,16 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：只让第二次 Core 复制失败，第三条停在 WAL→Core 空窗，验证恢复等原请求结算后无重复重放。
+     * English: Fails only the second Core copy and delays the third at the WAL-to-Core gap, checking recovery waits for original requests without duplicates.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineRuntimeBrokenBlockRecoveryTest() throws Exception {
         MemoryS3 remote = new MemoryS3();
         try (RegressionFixture fixture = new RegressionFixture("broken-block", remote)) {
             // Fault injection stays in the test: WAL receives real data, only the second core copy fails.
+            // 中文：反射和覆盖仅用于测试注入，不在生产代码增加故障开关；WAL 仍写真实完整协议。
             var coreField = BucketWriterWriter.class.getDeclaredField("cacheBlockManager");
             coreField.setAccessible(true);
             CacheBlockManager core = (CacheBlockManager) coreField.get(fixture.writer);
@@ -1199,8 +1306,16 @@ public class S3CloudCacheInstanceText {
             CloudCacheBlock originalBlock = core.getExistingBlock(secondWal.getFileFromOffset(), secondWal.getLogicalIndex());
             var failedAppend = core.appendData(new HeapBlockDataStruct(secondWal.getDefaultMappedFile(),
                     secondWal.getLogicalIndex(), second, 0, second.length) {
+                /**
+                 * 中文：测试专用复制失败策略，保留 WAL 原数据，只耗尽 Core 的复制重试。
+                 * English: Test-only copy-failure strategy retaining original WAL while exhausting Core copy retries.
+                 * @param target 中文：故意不写入的目标段；English: destination segment intentionally left untouched.
+                 * @return 中文：始终 false，模拟物理复制失败；English: always false to simulate a physical copy failure.
+                 */
                 @Override
                 public boolean writeTo(MemorySegment target) {
+                    // 中文：不写 target，重复返回 false 以耗尽 Core 原有的两次复制尝试。
+                    // English: Leave target untouched and return false on both of Core's copy attempts.
                     failedCopies.incrementAndGet();
                     return false;
                 }
@@ -1213,6 +1328,7 @@ public class S3CloudCacheInstanceText {
             checkRegression(core.getExistingBlock(secondWal.getFileFromOffset(), secondWal.getLogicalIndex()) == originalBlock,
                     "broken logical block was recycled before recovery");
             // This original append must register its Future and settle, but must not add a duplicate core copy.
+            // 中文：迟到原请求必须登记 Future 并结算，但恢复之外不应再次复制重复数据。
             core.appendData(new HeapBlockDataStruct(lateWal.getDefaultMappedFile(), lateWal.getLogicalIndex(),
                     late, 0, late.length), lateContext, true);
             verifyRegressionResult(remote, first, firstFuture.get(20, TimeUnit.SECONDS));
@@ -1222,6 +1338,11 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：占满物理池后中断申请，要求明确 FAILED、保留中断与 WAL、投死信并可重启恢复。
+     * English: Interrupts allocation under a full pool, requiring FAILED state, preserved interrupt/WAL, dead-letter notification and restart recovery.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineInterruptedPoolWaitTest() throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-interrupted-pool-");
         MemoryS3 remote = new MemoryS3();
@@ -1235,6 +1356,7 @@ public class S3CloudCacheInstanceText {
             CompletableFuture<WriteResult> secondFuture = fixture.writer.writeHeapData(second);
             checkRegression(remote.uploadEntered.await(10, TimeUnit.SECONDS), "pool owners did not start uploading");
             // Both physical blocks remain owned by gated uploads; the next logical block has only WAL data.
+            // 中文：闸门让物理池无空闲，第三个逻辑块只有 WAL 来源，没有可借用的绑定。
             MappedFileManager wal = fixture.writer.getMappedManager();
             AppendMessageResult record = wal.appendData(new WalDataStruct(waiting));
             checkRegression(record.isOk(), "waiting record was not accepted into WAL");
@@ -1285,14 +1407,30 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：损坏第二条 Value 的 CRC，禁止把首条合法前缀当完整 Block 上传。
+     * English: Corrupts the second Value CRC and forbids uploading the valid first prefix as a complete block.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineCorruptWalRecoveryTest() throws Exception {
         offlineCorruptWalRecovery(false);
     }
 
+    /**
+     * 中文：清零第二条、保留第三条，禁止把中间零洞当正常结束。
+     * English: Zeroes the second record while retaining a third, forbidding a middle zero gap from being treated as EOF.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineZeroHoleWalRecoveryTest() throws Exception {
         offlineCorruptWalRecovery(true);
     }
 
+    /**
+     * 中文：先制造上传失败留下临时 WAL，再仅损坏第二条并重启；断言恢复异常、PUT 次数为零且原 WAL 保留。
+     * English: Retains temporary WAL through upload failure, damages only the second record, then requires exceptional recovery, zero PUTs and retained WAL.
+     * @param zeroHole 中文：true 清零整条且保留后续记录；false 翻转 Value 使 CRC 失配；English: true zeroes a record before a later record; false flips Value to break CRC.
+     * @throws Exception 中文：临时文件或有界恢复等待失败；English: temporary-file or bounded recovery-wait failure.
+     */
     private static void offlineCorruptWalRecovery(boolean zeroHole) throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-corrupt-wal-");
         MemoryS3 failedRemote = new MemoryS3();
@@ -1317,6 +1455,8 @@ public class S3CloudCacheInstanceText {
                     .findFirst().orElseThrow(() -> new AssertionError("setup WAL disappeared"));
         }
         // Keep the first record valid; simulate either CRC damage or an unfilled reservation before a valid third record.
+        // 中文：4096 是文件元数据头，12 是记录头；第二条偏移必须加首条对齐后的长度。
+        // English: 4096 is the file metadata header and 12 the record header; locate the second record after the aligned first record.
         long secondHeaderOffset = 4096L + 12 + ((first.length + 3) & ~3);
         try (var channel = Files.newByteChannel(walFile, StandardOpenOption.WRITE)) {
             channel.position(zeroHole ? secondHeaderOffset : secondHeaderOffset + 12);
@@ -1350,6 +1490,11 @@ public class S3CloudCacheInstanceText {
                 "failed WAL recovery incorrectly marked its bucket clean");
     }
 
+    /**
+     * 中文：损坏 bucketMeta CRC 后拒绝恢复和新 Writer，逐字节检查旧 WAL/元数据未被覆盖。
+     * English: Corrupts bucketMeta CRC, requires recovery/new-writer rejection and verifies original WAL/metadata remain byte-identical.
+     * @throws Exception 中文：资源创建或有界等待失败，令测试失败；English: fixture/resource or bounded-wait failure fails the test.
+     */
     public static void offlineCorruptBucketMetadataTest() throws Exception {
         Path directory = Files.createTempDirectory("cloudcache-regression-corrupt-bucket-meta-");
         MemoryS3 failedRemote = new MemoryS3();
@@ -1368,6 +1513,8 @@ public class S3CloudCacheInstanceText {
         Path metadataFile = bucketDirectory.resolve("bucketMeta");
         byte[] metadataBytes = Files.readAllBytes(metadataFile);
         try (var channel = Files.newByteChannel(metadataFile, StandardOpenOption.WRITE)) {
+            // 中文：只翻转已存 CRC 的一个字节，不改布局字段；用保留的原字节验证失败路径不覆盖文件。
+            // English: Flip only a stored CRC byte, not layout fields; preserve original bytes to detect overwrite on failure.
             channel.position(16); // Stored CRC, after dirty(4), block size(4), and WAL size(8).
             channel.write(ByteBuffer.wrap(new byte[]{(byte) (metadataBytes[16] ^ 0x40)}));
         }
@@ -1407,6 +1554,11 @@ public class S3CloudCacheInstanceText {
                 "failed metadata recovery overwrote the original bucket metadata");
     }
 
+    /**
+     * 中文：主动封口并刷新 WAL/检查点，使故障回归不依赖空闲调度周期；它不等待 S3 上传完成。
+     * English: Explicitly seals/flushes WAL and checkpoints so regressions do not depend on idle timers; does not wait for S3 upload.
+     * @param writer 中文：测试拥有的运行中 Writer；English: live writer owned by the test.
+     */
     private static void sealRegressionTail(BucketWriterWriter writer) {
         MappedFileManager manager = writer.getMappedManager();
         manager.sealAllBlocks();
@@ -1414,6 +1566,13 @@ public class S3CloudCacheInstanceText {
         manager.endMetaFlush();
     }
 
+    /**
+     * 中文：测试 Value 自带大端 id/length 共 8 字节，与外层 12 字节 WAL 头无关，用于检测重复、缺失与乱序后的内容。
+     * English: Test Value begins with big-endian id/length (8 bytes), independent of the 12-byte WAL header, enabling duplicate/missing/content checks after reordering.
+     * @param id 中文：本用例唯一记录 ID；English: record ID unique within the case.
+     * @param length 中文：含测试头的 Value 字节数，至少 8；English: Value byte count including the test header, at least 8.
+     * @return 中文：新建确定性字节数组；English: newly allocated deterministic bytes.
+     */
     private static byte[] regressionRecord(int id, int length) {
         byte[] bytes = new byte[length];
         ByteBuffer.wrap(bytes).putInt(id).putInt(length);
@@ -1421,6 +1580,14 @@ public class S3CloudCacheInstanceText {
         return bytes;
     }
 
+    /**
+     * 中文：验证成功结果确实指向已接收对象的原始 Value，不能只凭 ETag 或长度判断正确。
+     * English: Verifies a successful result points to original Value bytes in an accepted object, not merely a matching ETag/length.
+     * @param remote 中文：保留已接受对象的模拟服务；English: fake retaining accepted objects.
+     * @param expected 中文：不可变使用的原始 Value；English: original Value treated as immutable.
+     * @param result 中文：必须非 null 且成功的提交结果；English: result required to be non-null and successful.
+     * @throws AssertionError 中文：身份、范围或字节不匹配；English: object, range or byte mismatch.
+     */
     private static void verifyRegressionResult(MemoryS3 remote, byte[] expected, WriteResult result) {
         checkRegression(result != null && result.isSuccess(), "write did not finish successfully");
         byte[] object = remote.objects.get(REGRESSION_BUCKET + "/" + result.getS3Key());
@@ -1432,10 +1599,22 @@ public class S3CloudCacheInstanceText {
                 "returned range differs from original record id=" + ByteBuffer.wrap(expected).getInt());
     }
 
+    /**
+     * @param records 中文：按 ID 唯一保存的期望 Value；English: expected Values uniquely keyed by ID.
+     * @return 中文：Value 字节总数，不计 WAL 头/填充；English: total Value bytes excluding WAL headers/padding.
+     */
     private static long totalRegressionBytes(Map<Integer, byte[]> records) {
         return records.values().stream().mapToLong(bytes -> bytes.length).sum();
     }
 
+    /**
+     * 中文：以单调时钟等待最低字节量到达，仅用于就绪等待；之后必须另外逐记录验证，不能用总长度证明完整性。
+     * English: Monotonic-clock readiness wait for a minimum byte count; follow with per-record verification since total length alone proves no integrity.
+     * @param remote 中文：可并发写入的模拟对象表；English: fake object store concurrently populated by uploads.
+     * @param expectedBytes 中文：期望至少接收的 Value 字节数；English: minimum expected Value bytes.
+     * @param timeoutMillis 中文：等待上限，毫秒；English: wait limit in milliseconds.
+     * @throws Exception 中文：等待中断；超时另抛 AssertionError；English: interrupted wait; timeout separately throws AssertionError.
+     */
     private static void awaitRegressionBytes(MemoryS3 remote, long expectedBytes, long timeoutMillis) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         while (remote.objects.values().stream().mapToLong(bytes -> bytes.length).sum() < expectedBytes) {
@@ -1444,6 +1623,13 @@ public class S3CloudCacheInstanceText {
         }
     }
 
+    /**
+     * 中文：按测试 Value 自带头遍历所有对象，不依赖对象/记录遍历顺序；必须 ID 集合一致、无重复、字节完全一致。
+     * English: Parses every object using test Value headers independent of traversal order; requires identical ID sets, no duplicates and exact bytes.
+     * @param remote 中文：待检查的模拟服务内容；English: fake service contents to verify.
+     * @param expected 中文：原始 ID→Value 映射；English: original ID-to-Value mapping.
+     * @throws AssertionError 中文：缺失、重复、未知 ID、截断或字节变化；English: missing, duplicate, unknown, truncated or changed records.
+     */
     private static void verifyRegressionRecords(MemoryS3 remote, Map<Integer, byte[]> expected) {
         Set<Integer> found = new HashSet<>();
         long total = 0;
@@ -1467,12 +1653,31 @@ public class S3CloudCacheInstanceText {
         checkRegression(total == totalRegressionBytes(expected), "S3 payload byte count mismatch");
     }
 
+    /**
+     * 中文：离线用例公共硬断言，不以日志掩盖失败；English: hard offline assertion that never hides failure in logs.
+     * @param condition 中文：必须成立的不变量；English: invariant required to hold.
+     * @param message 中文：失败上下文；English: failure context.
+     * @throws AssertionError 中文：condition 为 false；English: condition is false.
+     */
     private static void checkRegression(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
 
+    /**
+     * 中文：跨生产者收集的浅不可变对应关系，数组不防御复制，测试发布后不再修改。
+     * English: Shallowly immutable pairing collected across producers; arrays are not defensively copied and must stay unchanged after publication.
+     * @param payload 中文：原始 Value；English: original Value.
+     * @param future 中文：该条异步提交结果；English: asynchronous commit result for the record.
+     */
     private record PendingRegressionRecord(byte[] payload, CompletableFuture<WriteResult> future) { }
 
+    /**
+     * 中文：两块物理池/两块 WAL，关闭预热/锁页并开启模拟 HEAD；空闲时间 600000 ms，测试显式封口避免依赖定时器。
+     * English: Two-block pool/WAL, no warmup/page locking and fake HEAD enabled; 600000 ms idle threshold makes tests seal explicitly instead of relying on timers.
+     * @param directory 中文：本用例隔离目录，可在重启阶段复用；English: isolated case directory reusable during restart phases.
+     * @param name 中文：本用例稳定实例名；English: stable instance name for the case.
+     * @return 中文：新建可变配置，生产构造器还会快照；English: new mutable config, later snapshotted by the production constructor.
+     */
     private static S3CloudCacheConfig regressionConfig(Path directory, String name) {
         BucketConfig bucket = new BucketConfig()
                 .setBlockSize(REGRESSION_BLOCK_SIZE)
@@ -1488,16 +1693,38 @@ public class S3CloudCacheInstanceText {
         return config;
     }
 
+    /**
+     * 中文：离线场景的实例/闸门资源拥有者；临时目录保留便于重启和诊断，不代表会自动删除全部文件。
+     * English: Owns instance/gate cleanup for offline scenarios; temporary directories remain for restart/diagnostics rather than being recursively deleted.
+     */
     private static final class RegressionFixture implements AutoCloseable {
+        /** 中文：真实生产实例，由夹具关闭；English: real production instance closed by this fixture. */
         private final S3CloudCacheInstance instance;
+        /** 中文：共享测试 Bucket Writer，生命周期归实例；English: shared test writer owned by the instance. */
         private final BucketWriterWriter writer;
+        /** 中文：可跨重启阶段保留对象的模拟服务；English: fake service retaining objects across restart phases. */
         private final MemoryS3 remote;
+        /** 中文：避免 try-with-resources 与显式 close 重复收尾；English: prevents duplicate cleanup from explicit close plus try-with-resources. */
         private final AtomicBoolean closed = new AtomicBoolean();
 
+        /**
+         * 中文：创建全新临时目录用于隔离用例；English: creates a fresh temporary directory to isolate the case.
+         * @param name 中文：实例/目录诊断名；English: instance/directory diagnostic name.
+         * @param remote 中文：非 null 的模拟服务；English: non-null fake service.
+         * @throws Exception 中文：临时目录或初始化失败；English: temporary-directory or initialization failure.
+         */
         private RegressionFixture(String name, MemoryS3 remote) throws Exception {
             this(Files.createTempDirectory("cloudcache-regression-" + name + "-"), name, remote);
         }
 
+        /**
+         * 中文：允许复用目录模拟重启；启动恢复后取得 Writer，恢复可仍在异步执行。
+         * English: Allows directory reuse to simulate restart; obtains a writer after scheduling recovery, which may still be running.
+         * @param directory 中文：隔离 WAL 根目录；English: isolated WAL root.
+         * @param name 中文：稳定实例名；English: stable instance name.
+         * @param remote 中文：接收对象的模拟端；English: fake receiving uploaded objects.
+         * @throws Exception 中文：生产实例初始化或恢复准备失败；English: production initialization/recovery preparation failure.
+         */
         private RegressionFixture(Path directory, String name, MemoryS3 remote) throws Exception {
             this.remote = remote;
             log.info("Offline regression WAL directory: {}", directory);
@@ -1506,6 +1733,7 @@ public class S3CloudCacheInstanceText {
             writer = instance.getBucketWriterInstance(REGRESSION_BUCKET);
         }
 
+        /** 中文：先开闸再幂等关闭，避免失败收尾自己阻塞上传；English: opens the gate before idempotent close so test cleanup cannot itself block uploads. */
         @Override
         public void close() {
             remote.allowUpload.countDown();
@@ -1514,21 +1742,40 @@ public class S3CloudCacheInstanceText {
     }
 
     /** Synchronous in-memory S3 boundary: bytes are accepted before a successful response. */
+    /**
+     * 中文：线程安全内存对象表和可控失败/闸门，只模拟本项目使用的 PUT/HEAD；不是完整 S3 或掉电持久化模拟。
+     * English: Concurrent in-memory objects with controlled failures/gates, modeling only required PUT/HEAD operations, not complete S3 or power-loss durability.
+     */
     private static final class MemoryS3 {
+        /** 中文：bucket/key→完整对象字节，成功 PUT 响应前写入；English: bucket/key to full object bytes, stored before successful PUT response. */
         private final ConcurrentHashMap<String, byte[]> objects = new ConcurrentHashMap<>();
+        /** 中文：每个对象接受 PUT 的次数，用于检测重启重复覆盖；English: accepted PUT count per object, detecting repeated overwrite on restart. */
         private final ConcurrentHashMap<String, AtomicInteger> acceptedUploads = new ConcurrentHashMap<>();
+        /** 中文：按对象首条测试 ID 定向抛 503；English: test record IDs at object start selected for injected 503 failures. */
         private final Set<Integer> failedRecordIds = ConcurrentHashMap.newKeySet();
+        /** 中文：开启时 PUT 等待 allowUpload，模拟慢服务器；English: makes PUT await allowUpload to simulate a slow server. */
         private final AtomicBoolean blockUploads = new AtomicBoolean();
+        /** 中文：全部 PUT 注入 503，验证异常重试；English: injects 503 into every PUT to test exception retries. */
         private final AtomicBoolean failUploads = new AtomicBoolean();
+        /** 中文：含失败在内的 PUT 尝试数；English: PUT attempt count including failures. */
         private final AtomicInteger attempts = new AtomicInteger();
+        /** 中文：第一项上传已进入 SDK 边界的同步信号；English: signals entry of the first upload into the SDK boundary. */
         private final CountDownLatch uploadEntered = new CountDownLatch(1);
+        /** 中文：一次性放行全部等待 PUT，finally 必须放行；English: one-shot release of waiting PUTs, always released during cleanup. */
         private final CountDownLatch allowUpload = new CountDownLatch(1);
 
+        /**
+         * 中文：创建无网络代理；close 特意不清对象，模拟真实服务跨客户端重建仍保存数据。
+         * English: Creates a network-free proxy; close deliberately keeps objects to model a real service surviving client recreation.
+         * @return 中文：共享此模拟端状态的新客户端代理；English: new proxy sharing this fake's state.
+         */
         private S3Client client() {
             return (S3Client) Proxy.newProxyInstance(S3Client.class.getClassLoader(), new Class<?>[]{S3Client.class},
                     (proxy, method, args) -> {
                         switch (method.getName()) {
                             case "putObject": {
+                                // 中文：先阻塞/失败注入，再读取实际 RequestBody；不要直接读取测试原数组，否则会漏掉上传范围错误。
+                                // English: Gate/inject failure before reading the actual RequestBody, not the test's original array, to expose upload-range bugs.
                                 attempts.incrementAndGet();
                                 uploadEntered.countDown();
                                 if (blockUploads.get() && !allowUpload.await(20, TimeUnit.SECONDS)) {
@@ -1551,6 +1798,8 @@ public class S3CloudCacheInstanceText {
                                 return PutObjectResponse.builder().eTag("offline-etag").build();
                             }
                             case "headObject": {
+                                // 中文：长度来自已保存对象而不是请求声明，未 PUT 的对象返回 404。
+                                // English: Derive length from stored bytes, not request claims; an object never accepted by PUT yields 404.
                                 HeadObjectRequest request = (HeadObjectRequest) args[0];
                                 byte[] bytes = objects.get(request.bucket() + "/" + request.key());
                                 if (bytes == null) throw S3Exception.builder().statusCode(404).message("missing offline object").build();
@@ -1569,6 +1818,15 @@ public class S3CloudCacheInstanceText {
 
     /**
      * 写入回调统一处理：成功收集 (original, WriteResult)，失败计数，并递减 latch。
+     * English: Collects (original, result) on success, counts failures and signals callback completion; containers support concurrent notifications.
+     * @param test 中文：日志场景名；English: scenario label.
+     * @param index 中文：原记录序号；English: original record index.
+     * @param original 中文：未修改的原 Value；English: unchanged original Value.
+     * @param res 中文：可能为 null 的业务结果；English: possibly null business result.
+     * @param thr 中文：异常完成时的错误，可为 null；English: completion error, possibly null.
+     * @param pairs 中文：成功对应关系的并发集合；English: concurrent success pair collection.
+     * @param failCount 中文：原子失败计数；English: atomic failure count.
+     * @param latch 中文：每条回调都须递减的完成信号；English: completion signal decremented by every callback.
      */
     private static void onWriteDone(String test, int index, byte[] original, WriteResult res, Throwable thr,
                                     CopyOnWriteArrayList<Object[]> pairs, AtomicInteger failCount, CountDownLatch latch) {

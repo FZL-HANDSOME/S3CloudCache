@@ -3,14 +3,20 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- 中文：继承 1.0-SNAPSHOT 父 POM 的公共编译和日志约定。
+         English: Inherits shared compilation and logging conventions from the 1.0-SNAPSHOT parent POM. -->
     <parent>
         <groupId>org.example</groupId>
         <artifactId>S3CloudCache</artifactId>
         <version>1.0-SNAPSHOT</version>
     </parent>
 
+    <!-- 中文：共享 Block 状态机、计数器、Future 通知与队列，不直接依赖 core、wal 或 AWS SDK。
+         English: Shares the Block state machine, counters, Future notifications, and queues without direct dependencies on core, wal, or the AWS SDK. -->
     <artifactId>s3cloudcache-metadata</artifactId>
 
+    <!-- 中文：保持 Java 25 源码/目标字节码和 UTF-8，与使用这些共享状态类型的模块一致。
+         English: Retains Java 25 source/target bytecode and UTF-8, matching modules that consume these shared state types. -->
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
@@ -18,6 +24,8 @@
     </properties>
 
     <dependencies>
+        <!-- 中文：仅直接依赖同版本 common 的公共类型；默认 compile 范围允许依赖方使用这些类型。
+             English: The sole direct module dependency is same-version common; default compile scope exposes its shared types to dependents. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-common</artifactId>

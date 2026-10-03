@@ -3,14 +3,20 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+    <!-- 中文：与其它模块共用 1.0-SNAPSHOT 父工程约定，生产依赖默认采用 compile 范围。
+         English: Shares the 1.0-SNAPSHOT parent conventions; production dependencies use the default compile scope. -->
     <parent>
         <groupId>org.example</groupId>
         <artifactId>S3CloudCache</artifactId>
         <version>1.0-SNAPSHOT</version>
     </parent>
 
+    <!-- 中文：堆外物理 Block、恢复租约与上传执行的内部实现模块。
+         English: Internal implementation of native physical Blocks, recovery leases, and upload execution. -->
     <artifactId>s3cloudcache-core</artifactId>
 
+    <!-- 中文：固定 Java 25 源码和目标字节码，需支持此目标的 JDK；UTF-8 用于源码与注释。
+         English: Fixes Java 25 source and target bytecode, requiring a supporting JDK; UTF-8 is used for source text and comments. -->
     <properties>
         <maven.compiler.source>25</maven.compiler.source>
         <maven.compiler.target>25</maven.compiler.target>
@@ -18,21 +24,29 @@
     </properties>
 
     <dependencies>
+        <!-- 中文：common 提供配置、FutureContext、WriteResult 与统一异常，按本次 reactor 的 1.0-SNAPSHOT 版本链接。
+             English: common supplies configurations, FutureContext, WriteResult, and shared exceptions using this reactor's 1.0-SNAPSHOT version. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-common</artifactId>
             <version>1.0-SNAPSHOT</version>
         </dependency>
+        <!-- 中文：AWS S3 SDK 固定为 2.25.53，核心上传器直接使用同步 S3Client；此处不是 test 或 provided 依赖。
+             English: AWS S3 SDK is pinned to 2.25.53 for direct use of synchronous S3Client by the uploader; this is neither test nor provided scope. -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
             <version>2.25.53</version>
         </dependency>
+        <!-- 中文：wal 提供恢复读取及上传确认所需的映射文件抽象，不表示 core 自行定义另一套 WAL 格式。
+             English: wal provides mapped-file abstractions for recovery and upload acknowledgement; core does not define a second WAL format. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-wal</artifactId>
             <version>1.0-SNAPSHOT</version>
         </dependency>
+        <!-- 中文：metadata 与 WAL/存储层共享块状态和完成通知，避免各层持有彼此独立的提交状态。
+             English: metadata shares Block state and completion notifications with WAL/storage rather than giving each layer an independent commit state. -->
         <dependency>
             <groupId>org.example</groupId>
             <artifactId>s3cloudcache-metadata</artifactId>
